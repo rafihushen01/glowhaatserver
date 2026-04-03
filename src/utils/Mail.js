@@ -9,8 +9,8 @@ require("dotenv").config();
 */
 
 console.log("🚀 MAIL SYSTEM BOOTING...");
-const smtpUser = process.env.OTP_GMAIL ;
-const smtpPass = process.env.OTP_GMAIL_APP_PASS ;
+const smtpUser = String(process.env.OTP_GMAIL || "").trim();
+const smtpPass = String(process.env.OTP_GMAIL_APP_PASS || "").trim();
 
 console.log("GMAIL USER:", smtpUser);
 

@@ -41,6 +41,13 @@ const isValidMobile = (value = "") => {
   return /^\+?\d{8,15}$/.test(String(value).trim())
 }
 
+const getSuperAdminConfig = () => {
+  const superEmail = normalizeEmail(process.env.SUPERADMIN_EMAIL || process.env.SUPERADMIN_GMAIL || "")
+  const superPass = normalizePassword(process.env.SUPERADMIN_PASSWORD || "")
+  const superName = String(process.env.SUPERADMIN_NAME || "Super Admin").trim()
+  return { superEmail, superPass, superName }
+}
+
 const buildCookieOptions = () => {
   const isproduction = process.env.NODE_ENV === "production"
   return {
@@ -201,8 +208,7 @@ const payload=sanitize(req.body||{})
 const email=normalizeEmail(payload.email)
 const password=String(payload.password||"")
 
-const superEmail = normalizeEmail(process.env.SUPERADMIN_GMAIL || process.env.SUPERADMIN_GMAIL || "")
-const superPass = normalizePassword(process.env.SUPERADMIN_PASSWORD || "")
+const { superEmail, superPass } = getSuperAdminConfig()
 
 if(!email||!password){
 return res.status(400).json({message:"Missing email or password"})
@@ -257,8 +263,7 @@ exports.requestsuperadminotp = async (req, res) => {
     const email = normalizeEmail(payload.email)
     const password = normalizePassword(payload.password)
 
-    const superEmail = normalizeEmail(process.env.SUPERADMIN_EMAIL || process.env.SUPERADMIN_GMAIL || "")
-    const superPass = normalizePassword(process.env.SUPERADMIN_PASSWORD || "")
+    const { superEmail, superPass } = getSuperAdminConfig()
 
     if (!superEmail || !superPass) {
       return res.status(500).json({ message: "SuperAdmin credentials not configured" })
@@ -295,9 +300,7 @@ exports.verifysuperadminotp = async (req, res) => {
     const email = normalizeEmail(payload.email)
     const otp = normalizeOtp(payload.otp)
 
-    const superEmail = normalizeEmail(process.env.SUPERADMIN_EMAIL || "")
-    const superPass = normalizePassword(process.env.SUPERADMIN_PASSWORD || "")
-    const superName = String(process.env.SUPERADMIN_NAME || "Super Admin").trim()
+    const { superEmail, superPass, superName } = getSuperAdminConfig()
 
     if (!superEmail || !superPass) {
       return res.status(500).json({ message: "SuperAdmin credentials not configured" })
@@ -373,9 +376,7 @@ const payload=sanitize(req.body||{})
 const email=normalizeEmail(payload.email)
 const otp=normalizeOtp(payload.otp)
 
-const superEmail = normalizeEmail(process.env.SUPERADMIN_EMAIL || process.env.SUPERADMIN_GMAIL || "")
-const superPass = normalizePassword(process.env.SUPERADMIN_PASSWORD || "")
-const superName = String(process.env.SUPERADMIN_NAME || "Super Admin").trim()
+const { superEmail, superPass, superName } = getSuperAdminConfig()
 
 if(!email||!otp){
 return res.status(400).json({message:"Missing email or OTP"})
