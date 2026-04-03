@@ -13,6 +13,7 @@ const {
   getitemsbycategory,
   getnewinitems,
   getitem,
+  searchitems,
   shopbycategory,
   getcategoryfilters,
   filtercategoryproduct,
@@ -53,6 +54,7 @@ router.delete("/delete/:id", deleteitem);
 // 📦 GET ALL ITEMS
 // =======================================================
 router.get("/all", getallitems);
+router.get("/search", searchitems);
 
 
 

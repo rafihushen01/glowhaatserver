@@ -26,8 +26,22 @@ const userschema = new mongoose.Schema(
 mobile: {
   type: String,
   unique: true,
+  sparse: true,
 // <--- THIS IS THE FIX. It allows multiple 'null' values.
 },
+
+    firebaseuid: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+
+    authprovider: {
+      type: String,
+      enum: ["password", "google", "google+password"],
+      default: "password",
+    },
 
 
 
@@ -40,6 +54,8 @@ mobile: {
 
     usersignupotp: { type: String },
     usersigninotp: { type: String },
+    signinotp: { type: String },
+    signinotpexpires: { type: Date },
 
     issigninotpverified: { type: Boolean, default: false },
     issignupotpverified: { type: Boolean, default: false },

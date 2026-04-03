@@ -2,7 +2,7 @@ const mongoose=require("mongoose")
 
 const schema=new mongoose.Schema({
 
-email:{type:String,required:true,index:true},
+email:{type:String,required:true,index:true,lowercase:true,trim:true},
 
 fullname:String,
 
@@ -14,9 +14,9 @@ gender:String,
 
 role:String,
 
-otp:String,
+otp:{type:String,required:true},
 
-expire:Date
+expire:{type:Date,required:true}
 
 },{timestamps:true})
 

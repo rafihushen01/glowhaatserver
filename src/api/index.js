@@ -23,6 +23,10 @@ const navrouter=require("../routers/Navrouter.js")
 const homebannerroute=require("../routers/HomeBannerRoute.js")
 const itemrouter=require("../routers/Itemrouter.js")
 const categoryrouter=require("../routers/CategorySliderRouter.js")
+const cartrouter=require("../routers/Cartrouter.js")
+const brandrouter=require("../routers/Brandrouter.js")
+const userrouteradmin=require("../routers/UserRouter.js")
+const orderrouter=require("../routers/OrderRouter.js")
 /* ===================== SOCKET.IO (REAL-TIME & FAST) ===================== */
 const io = new Server(server, {
   cors: {
@@ -140,6 +144,10 @@ app.use("/nav",navrouter)
 app.use("/homebanner",homebannerroute)
 app.use("/item",itemrouter)
 app.use("/category",categoryrouter)
+app.use("/cart",cartrouter)
+app.use("/brand",brandrouter)
+app.use("/users", userrouteradmin)
+app.use("/order", orderrouter)
 /* ===================== GLOBAL ERROR HANDLER ===================== */
 app.use((err, req, res, next) => {
   console.error("🔥 Server Error:", err)

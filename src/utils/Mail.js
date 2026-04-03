@@ -73,13 +73,13 @@ const sendMailInternal = async (type, to, otp) => {
     console.log("🚀 Sending Email Through SMTP...");
 
     const info = await transporter.sendMail({
-      from: `EduBeast Security Team <${smtpUser}>`,
+      from: `KhanCosmetics Security Team <${smtpUser}>`,
       to,
-      subject: `EduBeast ${type} OTP - ${otp}`,
+      subject: `KhanCosmetics ${type} OTP - ${otp}`,
       html: `
         <div>
           <h2>Do NOT share your OTP</h2>
-          <h1 style="color:red">${otp}</h1>
+          <h1 style="color:green">${otp}</h1>
           <p>Valid for 5 minutes</p>
           <hr/>
           <small>Server Time: ${new Date().toISOString()}</small>

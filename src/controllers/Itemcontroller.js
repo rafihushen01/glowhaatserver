@@ -254,6 +254,39 @@ exports.getallitems = async (req, res) => {
   }
 };
 
+exports.searchitems = async (req, res) => {
+  try {
+    const raw = String(req.query?.q || "").trim();
+    if (!raw) {
+      return res.status(200).json({ success: true, count: 0, items: [] });
+    }
+
+    const safe = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(safe, "i");
+
+    const items = await Item.find({
+      isactive: true,
+      $or: [
+        { name: regex },
+        { brand: regex },
+        { categorypath: regex },
+        { tags: regex },
+      ],
+    })
+      .sort({ createdat: -1 })
+      .limit(12)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      count: items.length,
+      items,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 
 exports.getnewinitems = async (req, res) => {
   try {

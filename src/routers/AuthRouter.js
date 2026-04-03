@@ -1,10 +1,19 @@
 const express=require("express")
-const { requestsignupotp, verifysignupotp, requestsigninotp, verifysigninotp } = require("../controllers/AuthController")
+const { requestsignupotp, verifysignupotp, requestsigninotp, verifysigninotp, userlogout, getcurrentuser, requestsuperadminotp, verifysuperadminotp, googlesignup, googlesignin } = require("../controllers/AuthController")
+const { otpLimiter } = require("../utils/RateLimit")
+const isauth=require("../middlewares/IsAuth")
 
 const router=express.Router()
-router.post("/signupotp",requestsignupotp)
+router.post("/signupotp", otpLimiter, requestsignupotp)
+router.post("/verifysignupotp",verifysignupotp)
 router.post("/verifysignuptop",verifysignupotp)
-router.post("/signinotp",requestsigninotp)
+router.post("/signinotp", otpLimiter, requestsigninotp)
 router.post("/verifysigninotp",verifysigninotp)
+router.post("/superadmin/signinotp", otpLimiter, requestsuperadminotp)
+router.post("/superadmin/verifyotp",verifysuperadminotp)
+router.post("/google/signup", googlesignup)
+router.post("/google/signin", googlesignin)
+router.post("/logout",userlogout)
+router.get("/me",isauth,getcurrentuser)
 
 module.exports=router
