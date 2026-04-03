@@ -1,42 +1,30 @@
 const uploadoncloudinary = require("../utils/Cloudinary.js");
 const Item = require("../models/Item.js");
-const Category = require("../models/Category.js");
 const generateUniqueSlug = require("../utils/GenerateUniqueSlug.js");
 const Nav = require("../models/Nav.js");
-
-
-// ================= CATEGORY TREE BUILDER =================
-
-
-
 
 const buildCategoryTree = async (categoryids) => {
   const categories = await Nav.find({
     _id: { $in: categoryids },
     isactive: true,
-    isdeleted: false
+    isdeleted: false,
   })
-    .sort({ depth: 1 }) // ensure depth order
+    .sort({ depth: 1 })
     .lean();
 
   if (!categories.length) return [];
 
   let tree = null;
-  for (let i = categories.length - 1; i >= 0; i--) {
+  for (let i = categories.length - 1; i >= 0; i -= 1) {
     const cat = categories[i];
     tree = {
       name: cat.name,
       link: cat.link || cat.path,
-      children: tree ? [tree] : []
+      children: tree ? [tree] : [],
     };
   }
 
-  return [tree]; // wrap in array for consistency
-};
-const slugToCategoryName = (slug) => {
-  return slug
-    .replace(/-/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return [tree];
 };
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
@@ -47,7 +35,6 @@ const parseBoolean = (value, fallback = false) => {
 
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
-
     if (["true", "1", "yes", "on"].includes(normalized)) return true;
     if (["false", "0", "no", "off", ""].includes(normalized)) return false;
   }
@@ -67,29 +54,277 @@ const normalizeBooleanFields = (body, fieldDefaults) => {
   });
 };
 
+const safeJsonParse = (value, fallback) => {
+  try {
+    if (value === undefined || value === null || value === "") return fallback;
+    if (typeof value === "object") return value;
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
 
+const normalizeText = (value) => String(value || "").trim();
 
+const slugifyLoose = (value) =>
+  normalizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
 
+const normalizeArray = (value) => {
+  if (Array.isArray(value)) return value.map((entry) => normalizeText(entry)).filter(Boolean);
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (!raw) return [];
+
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      const parsed = safeJsonParse(raw, []);
+      return Array.isArray(parsed) ? parsed.map((entry) => normalizeText(entry)).filter(Boolean) : [];
+    }
+
+    return raw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const toNumberOrNull = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const extractCategoryNamesFromTree = (nodes = [], collector = []) => {
+  if (!Array.isArray(nodes)) return collector;
+
+  nodes.forEach((node) => {
+    if (!node || typeof node !== "object") return;
+    if (node.name) collector.push(node.name);
+    if (Array.isArray(node.children) && node.children.length) {
+      extractCategoryNamesFromTree(node.children, collector);
+    }
+  });
+
+  return collector;
+};
+
+const extractCategoryTokens = (item) => {
+  const tokens = new Set();
+  const addToken = (value) => {
+    const slug = slugifyLoose(value);
+    if (slug) tokens.add(slug);
+  };
+
+  if (Array.isArray(item.categorytree)) {
+    item.categorytree.forEach(addToken);
+
+    const joinedTree = item.categorytree.map((name) => slugifyLoose(name)).filter(Boolean).join("-");
+    if (joinedTree) tokens.add(joinedTree);
+  }
+
+  if (typeof item.categorypath === "string" && item.categorypath.trim()) {
+    const parts = item.categorypath
+      .split(/\s*(?:>|\/|\\|,|\|)\s*/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    parts.forEach(addToken);
+
+    const joinedPath = parts.map((part) => slugifyLoose(part)).filter(Boolean).join("-");
+    if (joinedPath) tokens.add(joinedPath);
+  }
+
+  const categoryNames = extractCategoryNamesFromTree(item.category || []);
+  if (categoryNames.length) {
+    categoryNames.forEach(addToken);
+    const joinedNested = categoryNames.map((name) => slugifyLoose(name)).filter(Boolean).join("-");
+    if (joinedNested) tokens.add(joinedNested);
+  }
+
+  return Array.from(tokens);
+};
+
+const getAllPrices = (product) => {
+  const prices = [];
+
+  [product.price, product.baseprice, product.sellingprice].forEach((candidate) => {
+    const numeric = toNumberOrNull(candidate);
+    if (numeric !== null && numeric >= 0) prices.push(numeric);
+  });
+
+  (product.variants || []).forEach((variant) => {
+    (variant.options || []).forEach((option) => {
+      const optionPrice = toNumberOrNull(option.currentprice);
+      if (optionPrice !== null && optionPrice >= 0) {
+        prices.push(optionPrice);
+        return;
+      }
+
+      const basePrice = toNumberOrNull(option.baseprice);
+      if (basePrice !== null && basePrice >= 0) prices.push(basePrice);
+    });
+  });
+
+  return prices;
+};
+
+const getProductPrice = (product) => {
+  const prices = getAllPrices(product);
+  if (!prices.length) return 0;
+  return Math.min(...prices);
+};
+
+const getTotalStock = (product) => {
+  let total = 0;
+  (product.variants || []).forEach((variant) => {
+    (variant.options || []).forEach((option) => {
+      const stock = toNumberOrNull(option.stock);
+      if (stock !== null && stock > 0) total += stock;
+    });
+  });
+  return total;
+};
+
+const getVariantValues = (product, targetType) => {
+  const normalizedTarget = slugifyLoose(targetType);
+  const values = new Set();
+
+  (product.variants || []).forEach((variant) => {
+    const typeSlug = slugifyLoose(variant.varianttype || "");
+    if (!typeSlug.includes(normalizedTarget)) return;
+
+    if (variant.name) values.add(normalizeText(variant.name));
+    (variant.options || []).forEach((option) => {
+      if (option.name) values.add(normalizeText(option.name));
+    });
+  });
+
+  return Array.from(values).filter(Boolean);
+};
+
+const itemBelongsToSegment = (item, slug) => {
+  const normalizedSlug = slugifyLoose(slug);
+  if (!normalizedSlug || normalizedSlug === "all") return true;
+
+  const slugParts = normalizedSlug.split("-").filter(Boolean);
+  const categoryTokens = extractCategoryTokens(item);
+
+  if (!categoryTokens.length) return false;
+
+  const haystack = categoryTokens.join("-");
+
+  if (categoryTokens.includes(normalizedSlug)) return true;
+  if (haystack.includes(normalizedSlug)) return true;
+  if (slugParts.length && slugParts.every((part) => haystack.includes(part))) return true;
+
+  return categoryTokens.some((token) => token.includes(normalizedSlug) || normalizedSlug.includes(token));
+};
+
+const buildIncomingFilters = (source = {}) => {
+  return {
+    colors: normalizeArray(source.colors).map((value) => value.toLowerCase()),
+    sizes: normalizeArray(source.sizes).map((value) => value.toLowerCase()),
+    brands: normalizeArray(source.brands).map((value) => value.toLowerCase()),
+    availability: normalizeText(source.availability).toLowerCase(),
+    search: normalizeText(source.search || source.q).toLowerCase(),
+    minprice: toNumberOrNull(source.minprice),
+    maxprice: toNumberOrNull(source.maxprice),
+    sort: normalizeText(source.sort || "newest").toLowerCase(),
+  };
+};
+
+const matchSearch = (product, search) => {
+  if (!search) return true;
+
+  const fields = [
+    product.name,
+    product.brand,
+    product.categorypath,
+    ...(Array.isArray(product.tags) ? product.tags : []),
+    ...(Array.isArray(product.categorytree) ? product.categorytree : []),
+  ]
+    .map((value) => normalizeText(value).toLowerCase())
+    .filter(Boolean);
+
+  return fields.some((field) => field.includes(search));
+};
+
+const applySegmentFilters = (products, filters) => {
+  const { colors, sizes, brands, availability, search, minprice, maxprice } = filters;
+
+  return products.filter((product) => {
+    const productColors = getVariantValues(product, "color").map((value) => value.toLowerCase());
+    const productSizes = getVariantValues(product, "size").map((value) => value.toLowerCase());
+    const productBrand = normalizeText(product.brand).toLowerCase();
+    const productPrices = getAllPrices(product);
+    const totalStock = getTotalStock(product);
+
+    const hasColorMatch = !colors.length || colors.some((color) => productColors.includes(color));
+    const hasSizeMatch = !sizes.length || sizes.some((size) => productSizes.includes(size));
+    const hasBrandMatch = !brands.length || (productBrand && brands.includes(productBrand));
+
+    let hasAvailabilityMatch = true;
+    if (availability === "in_stock") {
+      hasAvailabilityMatch = totalStock > 0;
+    } else if (availability === "out_of_stock") {
+      hasAvailabilityMatch = totalStock <= 0;
+    }
+
+    let hasPriceMatch = true;
+    if (minprice !== null || maxprice !== null) {
+      hasPriceMatch = productPrices.some((price) => {
+        if (minprice !== null && price < minprice) return false;
+        if (maxprice !== null && price > maxprice) return false;
+        return true;
+      });
+    }
+
+    const hasSearchMatch = matchSearch(product, search);
+
+    return hasColorMatch && hasSizeMatch && hasBrandMatch && hasAvailabilityMatch && hasPriceMatch && hasSearchMatch;
+  });
+};
+
+const sortProducts = (products, sort) => {
+  const sorted = [...products];
+
+  if (sort === "price_low_high") {
+    sorted.sort((a, b) => getProductPrice(a) - getProductPrice(b));
+    return sorted;
+  }
+
+  if (sort === "price_high_low") {
+    sorted.sort((a, b) => getProductPrice(b) - getProductPrice(a));
+    return sorted;
+  }
+
+  if (sort === "name_az") {
+    sorted.sort((a, b) => normalizeText(a.name).localeCompare(normalizeText(b.name)));
+    return sorted;
+  }
+
+  sorted.sort((a, b) => new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0));
+  return sorted;
+};
+
+const getProductsBySegmentSlug = async (slug) => {
+  const products = await Item.find({ isactive: true }).select("-__v").lean();
+  return products.filter((item) => itemBelongsToSegment(item, slug));
+};
 
 exports.createItem = async (req, res) => {
   try {
-    let body = { ...req.body };
+    const body = { ...req.body };
 
-    // ===== SAFE JSON PARSING =====
-    const safejson = (data, def) => {
-      try {
-        if (!data) return def;
-        if (typeof data === "object") return data;
-        return JSON.parse(data);
-      } catch {
-        return def;
-      }
-    };
-
-    body.variants = safejson(body.variants, []);
-    body.gallery = safejson(body.gallery, []);
-    body.categoryids = safejson(body.categoryids, []);
-    body.deliveryschema = safejson(body.deliveryschema, {});
+    body.variants = safeJsonParse(body.variants, []);
+    body.gallery = safeJsonParse(body.gallery, []);
+    body.categoryids = safeJsonParse(body.categoryids, []);
+    body.deliveryschema = safeJsonParse(body.deliveryschema, {});
 
     normalizeBooleanFields(body, {
       flashsale: false,
@@ -103,97 +338,99 @@ exports.createItem = async (req, res) => {
 
     body.coustomsales = body.coustomsale;
 
-    // ===== CATEGORY RESOLUTION =====
-    if (body.categoryids?.length) {
+    if (Array.isArray(body.categoryids) && body.categoryids.length) {
       body.category = await buildCategoryTree(body.categoryids);
     }
-    // ===== FILE MAPPING =====
+
     const fileMap = {};
-    (req.files || []).forEach(f => {
-      fileMap[f.fieldname] = fileMap[f.fieldname] || [];
-      fileMap[f.fieldname].push(f);
+    (req.files || []).forEach((file) => {
+      if (!fileMap[file.fieldname]) fileMap[file.fieldname] = [];
+      fileMap[file.fieldname].push(file);
     });
 
     const uploadFile = async (file) => {
-      try { return await uploadoncloudinary(file.path); } 
-      catch (err) { console.error("Cloudinary failed", file.originalname, err); return null; }
+      try {
+        return await uploadoncloudinary(file.path);
+      } catch (error) {
+        console.error("Cloudinary upload failed", file.originalname, error.message);
+        return null;
+      }
     };
 
-    // ===== MAIN IMAGES =====
-    const mainImages = ["whiteimage", "hoverimage"];
-    await Promise.all(mainImages.map(async key => {
-      if (fileMap[key]?.[0]) {
+    await Promise.all(
+      ["whiteimage", "hoverimage"].map(async (key) => {
+        if (!fileMap[key]?.[0]) return;
         const url = await uploadFile(fileMap[key][0]);
         if (url) body[key] = url;
-      }
-    }));
+      })
+    );
 
-    // ===== GALLERY =====
     if (fileMap.gallery?.length) {
       const galleryUrls = await Promise.all(fileMap.gallery.map(uploadFile));
       body.gallery = galleryUrls.filter(Boolean);
     }
 
-    // ===== VARIANTS MEDIA =====
-    if (body.variants?.length) {
-      let variantIndex = 0;
-      for (let v of body.variants) {
-        const need = v.images?.length || 0;
+    if (Array.isArray(body.variants) && body.variants.length) {
+      for (let variantIndex = 0; variantIndex < body.variants.length; variantIndex += 1) {
+        const variant = body.variants[variantIndex];
+        const expectedCount = Array.isArray(variant.images) ? variant.images.length : 0;
         const filesForVariant = [];
-        for (let i = 0; i < need; i++) {
-          const key = `variantmedia_${variantIndex}_${i}`;
+
+        for (let imageIndex = 0; imageIndex < expectedCount; imageIndex += 1) {
+          const key = `variantmedia_${variantIndex}_${imageIndex}`;
           filesForVariant.push(...(fileMap[key] || []));
         }
-        if (filesForVariant.length) {
-          const urls = await Promise.all(filesForVariant.map(uploadFile));
-          v.images = urls.filter(Boolean);
-        }
-        variantIndex++;
+
+        if (!filesForVariant.length) continue;
+
+        const urls = await Promise.all(filesForVariant.map(uploadFile));
+        variant.images = urls.filter(Boolean);
       }
     }
 
-    // ===== GENERATE UNIQUE SLUG =====
     body.slug = await generateUniqueSlug(body.name);
 
-    // ===== CREATE ITEM =====
     const item = await Item.create(body);
 
     return res.status(201).json({
       success: true,
-      message: "ITEM CREATED Successfully 🚀",
+      message: "Item created successfully",
       item,
     });
-
   } catch (error) {
     console.error("CREATE ITEM ERROR:", error);
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: error.message || "Unknown error",
-      });
-    }
+    if (res.headersSent) return;
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Unknown error",
+    });
   }
 };
-
 
 exports.edititem = async (req, res) => {
   try {
     const { id } = req.params;
-    let body = { ...req.body };
+    const body = { ...req.body };
 
-    if (typeof body.variants === "string")
-      body.variants = JSON.parse(body.variants);
+    if (typeof body.variants === "string") {
+      body.variants = safeJsonParse(body.variants, []);
+    }
 
-    if (req.files?.whiteimage)
-      body.whiteimage = await uploadoncloudinary(
-        req.files.whiteimage[0].path
-      );
+    const existing = await Item.findById(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Item not found" });
+    }
 
-    if (req.files?.hoverimage)
-      body.hoverimage = await uploadoncloudinary(
-        req.files.hoverimage[0].path
-      );
-         if (body.name && body.name !== item.name) {
+    if (req.files?.whiteimage) {
+      body.whiteimage = await uploadoncloudinary(req.files.whiteimage[0].path);
+    }
+
+    if (req.files?.hoverimage) {
+      body.hoverimage = await uploadoncloudinary(req.files.hoverimage[0].path);
+    }
+
+    if (body.name && body.name !== existing.name) {
       body.slug = await generateUniqueSlug(body.name, id);
     }
 
@@ -202,61 +439,59 @@ exports.edititem = async (req, res) => {
       runValidators: true,
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Item updated",
       item: updated,
     });
   } catch (error) {
-     console.error("CREATE ITEM ERROR:", error);
-    res.status(500).json({
+    console.error("EDIT ITEM ERROR:", error);
+    return res.status(500).json({
       success: false,
-      message: "Failed to create item",
+      message: "Failed to update item",
       error: error.message,
     });
   }
 };
+
 exports.deleteitem = async (req, res) => {
   try {
     const { id } = req.params;
-
     await Item.findByIdAndDelete(id);
 
-    res.json({
+    return res.json({
       success: true,
       message: "Item deleted",
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 };
+
 exports.getallitems = async (req, res) => {
   try {
     const { category, subcategory, search } = req.query;
-
-    let filter = {};
+    const filter = {};
 
     if (category) filter.category = category;
     if (subcategory) filter.subcategory = subcategory;
-
-    if (search)
-      filter.name = { $regex: search, $options: "i" };
+    if (search) filter.name = { $regex: search, $options: "i" };
 
     const items = await Item.find(filter).sort({ createdat: -1 });
 
-    res.json({
+    return res.json({
       success: true,
       count: items.length,
       items,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 };
 
 exports.searchitems = async (req, res) => {
   try {
-    const raw = String(req.query?.q || "").trim();
+    const raw = normalizeText(req.query?.q);
     if (!raw) {
       return res.status(200).json({ success: true, count: 0, items: [] });
     }
@@ -266,12 +501,7 @@ exports.searchitems = async (req, res) => {
 
     const items = await Item.find({
       isactive: true,
-      $or: [
-        { name: regex },
-        { brand: regex },
-        { categorypath: regex },
-        { tags: regex },
-      ],
+      $or: [{ name: regex }, { brand: regex }, { categorypath: regex }, { tags: regex }],
     })
       .sort({ createdat: -1 })
       .limit(12)
@@ -287,56 +517,49 @@ exports.searchitems = async (req, res) => {
   }
 };
 
-
 exports.getnewinitems = async (req, res) => {
   try {
-    const days = 5;
-
     const date = new Date();
-    date.setDate(date.getDate() - days);
+    date.setDate(date.getDate() - 5);
 
     const items = await Item.find({
       createdat: { $gte: date },
-      isactive: true
+      isactive: true,
     }).sort({ createdat: -1 });
 
-    res.json({ success: true, items });
+    return res.json({ success: true, items });
   } catch (err) {
-    res.status(500).json({ success:false, message: err.message });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
+
 exports.getitem = async (req, res) => {
   try {
     const { slug } = req.params;
-
     const item = await Item.findOne({ slug });
 
     if (!item) {
       return res.json({ success: false, message: "Item not found" });
     }
 
-    res.json({ success: true, item });
+    return res.json({ success: true, item });
   } catch (err) {
-    res.json({ success: false, message: err.message });
+    return res.json({ success: false, message: err.message });
   }
 };
+
 exports.shopbycategory = async (req, res) => {
   try {
     const { slug } = req.params;
-    const categoryName = slugToCategoryName(slug);   // ✅ FIX
+    const filters = buildIncomingFilters(req.query);
 
-    const products = await Item.find({
-      categorypath: { $regex: categoryName, $options: "i" }, // ✅ FIX
-      isactive: true,
-    })
-      .select("-__v")
-      .sort({ createdAt: -1 })
-      .lean();
+    const products = await getProductsBySegmentSlug(slug);
+    const filtered = sortProducts(applySegmentFilters(products, filters), filters.sort);
 
     return res.status(200).json({
       success: true,
-      count: products.length,
-      data: products,
+      count: filtered.length,
+      data: filtered,
     });
   } catch (error) {
     console.error("shopbycategory error:", error);
@@ -347,72 +570,55 @@ exports.shopbycategory = async (req, res) => {
   }
 };
 
-// ================= CATEGORY FILTER DATA =================
 exports.getcategoryfilters = async (req, res) => {
   try {
     const { slug } = req.params;
-    const categoryName = slugToCategoryName(slug);
+    const products = await getProductsBySegmentSlug(slug);
 
-    const products = await Item.find({
-      categorypath: { $regex: categoryName, $options: "i" },
-      isactive: true,
-    }).lean();
+    const colors = new Set();
+    const sizes = new Set();
+    const brands = new Set();
+    const categoryTrails = new Set();
+    const prices = [];
 
-    let colors = new Set();
-    let sizes = new Set();
-    let prices = [];
+    let inStockCount = 0;
+    let outOfStockCount = 0;
 
     products.forEach((product) => {
-      // 1️⃣ Direct/base price support
-      if (product.price != null) prices.push(Number(product.price));
-      if (product.baseprice != null) prices.push(Number(product.baseprice));
-      if (product.sellingprice != null) prices.push(Number(product.sellingprice));
+      getVariantValues(product, "color").forEach((color) => colors.add(color));
+      getVariantValues(product, "size").forEach((size) => sizes.add(size));
 
-      product.variants?.forEach((variant) => {
-        const type = variant.varianttype?.toLowerCase();
+      const brand = normalizeText(product.brand);
+      if (brand) brands.add(brand);
 
-        // 2️⃣ COLOR (case-insensitive)
-        if (type?.includes("color")) {
-          if (variant.name) colors.add(variant.name.trim());
-        }
+      if (Array.isArray(product.categorytree) && product.categorytree.length) {
+        categoryTrails.add(product.categorytree.join(" > "));
+      } else if (normalizeText(product.categorypath)) {
+        categoryTrails.add(normalizeText(product.categorypath));
+      }
 
-        // 3️⃣ SIZE
-        if (type?.includes("size")) {
-          variant.options?.forEach((opt) => {
-            if (opt.name) sizes.add(opt.name.trim());
+      const itemPrices = getAllPrices(product);
+      prices.push(...itemPrices);
 
-            if (opt.currentprice != null) {
-              prices.push(Number(opt.currentprice));
-            }
-          });
-        }
-
-        // 4️⃣ If variant has price but not size type
-        variant.options?.forEach((opt) => {
-          if (opt.currentprice != null) {
-            prices.push(Number(opt.currentprice));
-          }
-        });
-      });
+      if (getTotalStock(product) > 0) inStockCount += 1;
+      else outOfStockCount += 1;
     });
 
-    // Remove invalid prices
-    prices = prices.filter((p) => !isNaN(p) && p >= 0);
-
-    const minPrice = prices.length ? Math.min(...prices) : 0;
-    const maxPrice = prices.length ? Math.max(...prices) : 0;
+    const cleanPrices = prices.filter((price) => Number.isFinite(price) && price >= 0);
 
     return res.status(200).json({
       success: true,
       filters: {
-        colors: [...colors].sort(),
-        sizes: [...sizes].sort(),
-        minPrice,
-        maxPrice,
-      },
-      debug: {
-        totalProducts: products.length,
-        totalPricesCollected: prices.length,
+        colors: Array.from(colors).sort((a, b) => a.localeCompare(b)),
+        sizes: Array.from(sizes).sort((a, b) => a.localeCompare(b)),
+        brands: Array.from(brands).sort((a, b) => a.localeCompare(b)),
+        categoryTrails: Array.from(categoryTrails),
+        minPrice: cleanPrices.length ? Math.min(...cleanPrices) : 0,
+        maxPrice: cleanPrices.length ? Math.max(...cleanPrices) : 0,
+        availability: {
+          in_stock: inStockCount,
+          out_of_stock: outOfStockCount,
+        },
       },
     });
   } catch (error) {
@@ -424,82 +630,13 @@ exports.getcategoryfilters = async (req, res) => {
   }
 };
 
-// ================= FILTER CATEGORY PRODUCTS =================
 exports.filtercategoryproduct = async (req, res) => {
   try {
-  const { slug } = req.params;
-const categoryName = slugToCategoryName(slug);  
-    const { colors, sizes, minprice, maxprice, sort } = req.body;
+    const { slug } = req.params;
+    const filters = buildIncomingFilters(req.body || {});
 
-  const products = await Item.find({
-  categorypath: { $regex: categoryName, $options: "i" }, // ✅
-  isactive: true,
-}).lean();
-
-    let filtered = products.filter((product) => {
-      let colorMatch = !colors?.length;
-      let sizeMatch = !sizes?.length;
-    let priceMatch = !minprice && !maxprice;
-
-
-if (opt.currentprice != null) {
-  const price = Number(opt.currentprice);
-  if (
-    (!minprice || price >= minprice) &&
-    (!maxprice || price <= maxprice)
-  ) {
-    priceMatch = true;
-  }
-}
-
-
-      product.variants?.forEach((variant) => {
-        // COLOR MATCH
-        if (colors?.length && variant.varianttype === "color") {
-          if (colors.includes(variant.name)) colorMatch = true;
-        }
-
-        // SIZE + PRICE MATCH
-        if (variant.varianttype === "size") {
-          variant.options?.forEach((opt) => {
-            if (sizes?.length && sizes.includes(opt.name)) {
-              sizeMatch = true;
-            }
-
-            if (
-              (minprice || maxprice) &&
-              opt.currentprice >= (minprice || 0) &&
-              opt.currentprice <= (maxprice || Infinity)
-            ) {
-              priceMatch = true;
-            }
-          });
-        }
-      });
-
-      return colorMatch && sizeMatch && priceMatch;
-    });
-
-    // SORTING
-    if (sort === "price_low_high") {
-      filtered.sort(
-        (a, b) =>
-          (a.variants?.[0]?.options?.[0]?.currentprice || 0) -
-          (b.variants?.[0]?.options?.[0]?.currentprice || 0)
-      );
-    }
-
-    if (sort === "price_high_low") {
-      filtered.sort(
-        (a, b) =>
-          (b.variants?.[0]?.options?.[0]?.currentprice || 0) -
-          (a.variants?.[0]?.options?.[0]?.currentprice || 0)
-      );
-    }
-
-    if (sort === "newest") {
-      filtered.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    }
+    const products = await getProductsBySegmentSlug(slug);
+    const filtered = sortProducts(applySegmentFilters(products, filters), filters.sort);
 
     return res.status(200).json({
       success: true,

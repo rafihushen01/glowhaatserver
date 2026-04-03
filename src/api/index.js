@@ -27,6 +27,7 @@ const cartrouter=require("../routers/Cartrouter.js")
 const brandrouter=require("../routers/Brandrouter.js")
 const userrouteradmin=require("../routers/UserRouter.js")
 const orderrouter=require("../routers/OrderRouter.js")
+const engagementrouter=require("../routers/EngagementRouter.js")
 /* ===================== SOCKET.IO (REAL-TIME & FAST) ===================== */
 const io = new Server(server, {
   cors: {
@@ -148,6 +149,7 @@ app.use("/cart",cartrouter)
 app.use("/brand",brandrouter)
 app.use("/users", userrouteradmin)
 app.use("/order", orderrouter)
+app.use("/engagement", engagementrouter)
 /* ===================== GLOBAL ERROR HANDLER ===================== */
 app.use((err, req, res, next) => {
   console.error("🔥 Server Error:", err)

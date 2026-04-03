@@ -48,6 +48,7 @@ const itemschema = new mongoose.Schema({
   aboutitems: String,
   review: String,
   star: { type: Number, default: 0 },
+  reviewcount: { type: Number, default: 0 },
   brand: String,
   whiteimage: String,
   hoverimage: String,
