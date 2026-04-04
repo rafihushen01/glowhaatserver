@@ -5,11 +5,12 @@ const dotenv = require("dotenv")
 const cors = require("cors")
 const cookieparser = require("cookie-parser")
 const http = require("http")
+const path = require("path")
 const { Server } = require("socket.io")
 const mongoose = require("mongoose")
 const compression = require("compression")
 
-dotenv.config()
+dotenv.config({ path: path.resolve(__dirname, "../../.env") })
 
 const app = express()
 
@@ -69,6 +70,24 @@ io.on("connection", (socket) => {
 app.use(compression()) // gzip compression → faster
 app.use(express.json({ limit: "10mb" })) // support large payload
 app.use(cookieparser())
+
+/* ===================== PUBLIC CORS (CATEGORY SHOWCASE) ===================== */
+const publicCorsPaths = new Set([
+  "/category/public/full",
+  "/category/active"
+])
+
+app.use((req, res, next) => {
+  if (!publicCorsPaths.has(req.path)) return next()
+
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS")
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+  res.setHeader("Vary", "Origin")
+
+  if (req.method === "OPTIONS") return res.sendStatus(204)
+  return next()
+})
 
 /* ===================== CORS (FAST + SAFE) ===================== */
 app.use(cors({

@@ -682,12 +682,21 @@ exports.buildNavTreeCache = async (forceRefresh = false) => {
 // =============================================
 exports.getPublicCategoriesFull = async (req, res) => {
   try {
-    const categories = await CategorySlider.find({
+    let categories = await CategorySlider.find({
       isactive: true,
       isdeleted: false,
     })
       .sort({ order: 1 })
       .lean();
+
+    // Fallback: if nothing active, return non-deleted categories so UI can still render.
+    if (!categories.length) {
+      categories = await CategorySlider.find({
+        isdeleted: false,
+      })
+        .sort({ order: 1 })
+        .lean();
+    }
 
     if (!categories.length) {
       return res.json({ success: true, count: 0, data: [] });
@@ -826,5 +835,4 @@ exports.rebuildAllCategoryNavpaths = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
-
 

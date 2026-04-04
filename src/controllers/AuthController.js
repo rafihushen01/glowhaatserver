@@ -42,10 +42,42 @@ const isValidMobile = (value = "") => {
 }
 
 const getSuperAdminConfig = () => {
-  const superEmail = normalizeEmail(process.env.SUPERADMIN_EMAIL || process.env.SUPERADMIN_GMAIL || "")
-  const superPass = normalizePassword(process.env.SUPERADMIN_PASSWORD || "")
+  const superEmails = [
+    process.env.SUPERADMIN_EMAIL,
+    process.env.SUPERADMIN_GMAIL
+  ]
+    .map(normalizeEmail)
+    .filter(Boolean)
+
+  const superPasswords = [
+    process.env.SUPERADMIN_PASSWORD,
+    process.env.SUPERADMIN_PASS
+  ]
+    .map(normalizePassword)
+    .filter(Boolean)
+
+  const superEmail = superEmails[0] || ""
+  const superPass = superPasswords[0] || ""
   const superName = String(process.env.SUPERADMIN_NAME || "Super Admin").trim()
-  return { superEmail, superPass, superName }
+
+  const isAuthorizedSuperAdminEmail = (candidateEmail = "") => {
+    const normalizedCandidate = normalizeEmail(candidateEmail)
+    return superEmails.includes(normalizedCandidate)
+  }
+
+  const isAuthorizedSuperAdminPassword = (candidatePassword = "") => {
+    const normalizedCandidate = normalizePassword(candidatePassword)
+    return superPasswords.includes(normalizedCandidate)
+  }
+
+  return {
+    superEmail,
+    superPass,
+    superName,
+    hasCredentials: Boolean(superEmails.length && superPasswords.length),
+    isAuthorizedSuperAdminEmail,
+    isAuthorizedSuperAdminPassword
+  }
 }
 
 const buildCookieOptions = () => {
@@ -208,14 +240,14 @@ const payload=sanitize(req.body||{})
 const email=normalizeEmail(payload.email)
 const password=String(payload.password||"")
 
-const { superEmail, superPass } = getSuperAdminConfig()
+const { hasCredentials, isAuthorizedSuperAdminEmail, isAuthorizedSuperAdminPassword } = getSuperAdminConfig()
 
 if(!email||!password){
 return res.status(400).json({message:"Missing email or password"})
 }
 
 // SuperAdmin hidden flow (no public toggle)
-if (superEmail && superPass && email === superEmail && password === superPass) {
+if (hasCredentials && isAuthorizedSuperAdminEmail(email) && isAuthorizedSuperAdminPassword(password)) {
   const otp = generateotp()
   const otpHash = hashotp(otp)
   await SuperAdminOtp.findOneAndUpdate(
@@ -263,9 +295,9 @@ exports.requestsuperadminotp = async (req, res) => {
     const email = normalizeEmail(payload.email)
     const password = normalizePassword(payload.password)
 
-    const { superEmail, superPass } = getSuperAdminConfig()
+    const { hasCredentials, isAuthorizedSuperAdminEmail, isAuthorizedSuperAdminPassword } = getSuperAdminConfig()
 
-    if (!superEmail || !superPass) {
+    if (!hasCredentials) {
       return res.status(500).json({ message: "SuperAdmin credentials not configured" })
     }
 
@@ -273,7 +305,7 @@ exports.requestsuperadminotp = async (req, res) => {
       return res.status(400).json({ message: "Missing email or password" })
     }
 
-    if (email !== superEmail || password !== superPass) {
+    if (!isAuthorizedSuperAdminEmail(email) || !isAuthorizedSuperAdminPassword(password)) {
       return res.status(401).json({ message: "Invalid superadmin credentials" })
     }
 
@@ -300,9 +332,15 @@ exports.verifysuperadminotp = async (req, res) => {
     const email = normalizeEmail(payload.email)
     const otp = normalizeOtp(payload.otp)
 
-    const { superEmail, superPass, superName } = getSuperAdminConfig()
+    const {
+      superEmail,
+      superPass,
+      superName,
+      hasCredentials,
+      isAuthorizedSuperAdminEmail
+    } = getSuperAdminConfig()
 
-    if (!superEmail || !superPass) {
+    if (!hasCredentials) {
       return res.status(500).json({ message: "SuperAdmin credentials not configured" })
     }
 
@@ -310,7 +348,7 @@ exports.verifysuperadminotp = async (req, res) => {
       return res.status(400).json({ message: "Missing email or OTP" })
     }
 
-    if (email !== superEmail) {
+    if (!isAuthorizedSuperAdminEmail(email)) {
       return res.status(401).json({ message: "Please sign in first to continue." })
     }
 
@@ -376,14 +414,20 @@ const payload=sanitize(req.body||{})
 const email=normalizeEmail(payload.email)
 const otp=normalizeOtp(payload.otp)
 
-const { superEmail, superPass, superName } = getSuperAdminConfig()
+const {
+  superEmail,
+  superPass,
+  superName,
+  hasCredentials,
+  isAuthorizedSuperAdminEmail
+} = getSuperAdminConfig()
 
 if(!email||!otp){
 return res.status(400).json({message:"Missing email or OTP"})
 }
 
 // SuperAdmin verification path
-if (superEmail && superPass && email === superEmail) {
+if (hasCredentials && isAuthorizedSuperAdminEmail(email)) {
   const record = await SuperAdminOtp.findOne({ email }).sort({ updatedAt: -1 })
   if (!record) {
     return res.status(400).json({ message: "Invalid request" })

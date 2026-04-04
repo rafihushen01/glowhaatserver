@@ -1,5 +1,6 @@
 const nodemailer = require("nodemailer");
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 
 const smtpUser = String(process.env.OTP_GMAIL || "").trim();
 const smtpPass = String(process.env.OTP_GMAIL_APP_PASS || "").trim();
