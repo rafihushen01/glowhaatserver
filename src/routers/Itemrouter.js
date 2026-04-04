@@ -2,6 +2,14 @@ const express = require("express");
 const router = express.Router();
 
 const upload = require("../middlewares/Multer");
+const isauth = require("../middlewares/IsAuth");
+const optionalauth = require("../middlewares/OptionalAuth");
+const {
+  createShareLink,
+  registerShareOpen,
+  getShareAnalytics,
+  exportShareAnalyticsCsv,
+} = require("../controllers/ProductShareController");
 
 const {
 
@@ -65,6 +73,10 @@ router.get("/search", searchitems);
 router.get("/getnewitems",getnewinitems)
 router.get("/getitembyslug/:slug",getitem)
 
+router.post("/share/:slug", optionalauth, createShareLink);
+router.post("/share/open/:token", optionalauth, registerShareOpen);
+router.get("/share/admin/analytics", isauth, getShareAnalytics);
+router.get("/share/admin/analytics/export", isauth, exportShareAnalyticsCsv);
 
 
 
