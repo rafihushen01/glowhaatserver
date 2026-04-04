@@ -234,6 +234,8 @@ const buildIncomingFilters = (source = {}) => {
     search: normalizeText(source.search || source.q).toLowerCase(),
     minprice: toNumberOrNull(source.minprice),
     maxprice: toNumberOrNull(source.maxprice),
+    minrating: toNumberOrNull(source.minrating),
+    maxrating: toNumberOrNull(source.maxrating),
     sort: normalizeText(source.sort || "newest").toLowerCase(),
   };
 };
@@ -255,13 +257,15 @@ const matchSearch = (product, search) => {
 };
 
 const applySegmentFilters = (products, filters) => {
-  const { colors, sizes, brands, availability, search, minprice, maxprice } = filters;
+  const { colors, sizes, brands, availability, search, minprice, maxprice, minrating, maxrating } = filters;
 
   return products.filter((product) => {
     const productColors = getVariantValues(product, "color").map((value) => value.toLowerCase());
     const productSizes = getVariantValues(product, "size").map((value) => value.toLowerCase());
     const productBrand = normalizeText(product.brand).toLowerCase();
     const productPrices = getAllPrices(product);
+    const productRatingRaw = toNumberOrNull(product.star);
+    const productRating = productRatingRaw !== null ? Math.max(0, productRatingRaw) : 0;
     const totalStock = getTotalStock(product);
 
     const hasColorMatch = !colors.length || colors.some((color) => productColors.includes(color));
@@ -285,8 +289,11 @@ const applySegmentFilters = (products, filters) => {
     }
 
     const hasSearchMatch = matchSearch(product, search);
+    let hasRatingMatch = true;
+    if (minrating !== null && productRating < minrating) hasRatingMatch = false;
+    if (maxrating !== null && productRating > maxrating) hasRatingMatch = false;
 
-    return hasColorMatch && hasSizeMatch && hasBrandMatch && hasAvailabilityMatch && hasPriceMatch && hasSearchMatch;
+    return hasColorMatch && hasSizeMatch && hasBrandMatch && hasAvailabilityMatch && hasPriceMatch && hasSearchMatch && hasRatingMatch;
   });
 };
 
@@ -580,6 +587,7 @@ exports.getcategoryfilters = async (req, res) => {
     const brands = new Set();
     const categoryTrails = new Set();
     const prices = [];
+    const ratings = [];
 
     let inStockCount = 0;
     let outOfStockCount = 0;
@@ -599,12 +607,16 @@ exports.getcategoryfilters = async (req, res) => {
 
       const itemPrices = getAllPrices(product);
       prices.push(...itemPrices);
+      const rating = toNumberOrNull(product.star);
+      ratings.push(rating !== null && rating > 0 ? rating : 0);
 
       if (getTotalStock(product) > 0) inStockCount += 1;
       else outOfStockCount += 1;
     });
 
     const cleanPrices = prices.filter((price) => Number.isFinite(price) && price >= 0);
+    const cleanRatings = ratings.filter((rating) => Number.isFinite(rating) && rating >= 0);
+    const maxCategoryRating = cleanRatings.length ? Math.min(5, Math.ceil(Math.max(...cleanRatings))) : 0;
 
     return res.status(200).json({
       success: true,
@@ -615,6 +627,8 @@ exports.getcategoryfilters = async (req, res) => {
         categoryTrails: Array.from(categoryTrails),
         minPrice: cleanPrices.length ? Math.min(...cleanPrices) : 0,
         maxPrice: cleanPrices.length ? Math.max(...cleanPrices) : 0,
+        minRating: 0,
+        maxRating: maxCategoryRating,
         availability: {
           in_stock: inStockCount,
           out_of_stock: outOfStockCount,

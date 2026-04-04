@@ -1,14 +1,14 @@
 {
   "name": "khancosmeticsbackend",
   "version": "1.0.0",
-  "description": "Damask Production Backend",
+  "description": "khancosmetics Backend",
   "main": "src/api/index.js",
   "scripts": {
     "start": "node src/api/index.js",
     "dev": "nodemon src/api/index.js"
   },
   "keywords": [],
-  "author": "MdKhan",
+  "author": "khancosmetics",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
