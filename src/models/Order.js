@@ -30,7 +30,7 @@ const statusHistorySchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: ["placed", "processing", "shipped", "delivered", "canceled"],
+      enum: ["placed", "processing", "shipped", "delivered", "returned", "canceled"],
       required: true,
     },
     note: { type: String, default: "" },
@@ -45,12 +45,18 @@ const statusHistorySchema = new mongoose.Schema(
 
 const orderSchema = new mongoose.Schema(
   {
-    userid: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
+    ownerid: {
+      type: String,
       required: true,
       index: true,
     },
+    userid: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+      default: null,
+    },
+    guestid: { type: String, default: "", index: true },
     ordernumber: {
       type: String,
       required: true,
@@ -89,7 +95,7 @@ const orderSchema = new mongoose.Schema(
     grandtotal: { type: Number, required: true, min: 0 },
     status: {
       type: String,
-      enum: ["placed", "processing", "shipped", "delivered", "canceled"],
+      enum: ["placed", "processing", "shipped", "delivered", "returned", "canceled"],
       default: "placed",
       index: true,
     },
@@ -98,8 +104,8 @@ const orderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+orderSchema.index({ ownerid: 1, createdAt: -1 });
 orderSchema.index({ userid: 1, createdAt: -1 });
 orderSchema.index({ status: 1, createdAt: -1 });
 
 module.exports = mongoose.model("order", orderSchema);
-

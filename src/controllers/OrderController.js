@@ -3,8 +3,11 @@ const mongoose = require("mongoose");
 const Cart = require("../models/Cart");
 const Order = require("../models/Order");
 const User = require("../models/User");
+const { requireActor } = require("../utils/RequestActor");
+const Item = require("../models/Item");
+const { resolveActor, recordBehaviorSignal } = require("../utils/RecommendationSignals");
 
-const ALLOWED_STATUSES = ["placed", "processing", "shipped", "delivered", "canceled"];
+const ALLOWED_STATUSES = ["placed", "processing", "shipped", "delivered", "returned", "canceled"];
 const ALLOWED_PAYMENT_METHODS = ["cod", "bkash", "nagad", "bank"];
 
 const toSafeString = (value) => (value == null ? "" : String(value).trim());
@@ -27,7 +30,7 @@ const generateOrderNumber = () => {
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
-    res.status(401).json({ success: false, message: "Unauthorized access" });
+    res.status(401).json({ success: false, message: "Please sign in first to continue." });
     return null;
   }
 
@@ -41,10 +44,8 @@ const ensureSuperAdmin = async (req, res) => {
 
 exports.placeorder = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const payload = sanitize(req.body || {});
     const fullname = toSafeString(payload.fullname);
@@ -82,7 +83,7 @@ exports.placeorder = async (req, res) => {
       });
     }
 
-    const cartItems = await Cart.find({ userid }).sort({ updatedAt: -1 }).lean();
+    const cartItems = await Cart.find(requestactor.ownerfilter).sort({ updatedAt: -1 }).lean();
     if (!cartItems.length) {
       return res.status(400).json({ success: false, message: "Cart is empty" });
     }
@@ -121,7 +122,9 @@ exports.placeorder = async (req, res) => {
     }
 
     const order = await Order.create({
-      userid,
+      ownerid: requestactor.ownerid,
+      userid: requestactor.userid || null,
+      guestid: requestactor.guestid || "",
       ordernumber,
       customer: { fullname, email, mobile },
       shippingaddress: {
@@ -146,13 +149,43 @@ exports.placeorder = async (req, res) => {
       deliverytotal,
       grandtotal,
       status: "placed",
-      statushistory: [{ status: "placed", note: "Order placed successfully", changedby: userid }],
+      statushistory: [
+        {
+          status: "placed",
+          note: "Order placed successfully",
+          changedby: requestactor.userid || null,
+        },
+      ],
     });
 
-    await Cart.deleteMany({ userid });
-    await User.findByIdAndUpdate(userid, {
-      $inc: { totalorders: 1, totalspent: grandtotal },
-    });
+    await Cart.deleteMany(requestactor.ownerfilter);
+    if (requestactor.userid) {
+      await User.findByIdAndUpdate(requestactor.userid, {
+        $inc: { totalorders: 1, totalspent: grandtotal },
+      });
+    }
+
+    const actor = resolveActor(req, payload);
+    if (actor) {
+      const productIds = items.map((entry) => entry.productid);
+      const products = await Item.find({ _id: { $in: productIds } })
+        .select("_id slug name brand categorytree categorypath variants isactive")
+        .lean();
+      const productMap = new Map(products.map((entry) => [String(entry._id), entry]));
+
+      await Promise.all(
+        items.map(async (entry) => {
+          const product = productMap.get(String(entry.productid));
+          if (!product) return;
+          await recordBehaviorSignal({
+            actor,
+            product,
+            eventtype: "order",
+            quantity: Number(entry.quantity || 1),
+          });
+        })
+      );
+    }
 
     return res.status(201).json({
       success: true,
@@ -170,14 +203,12 @@ exports.placeorder = async (req, res) => {
 
 exports.getmyorders = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const query = sanitize(req.query || {});
     const status = toSafeString(query.status).toLowerCase();
-    const filters = { userid };
+    const filters = { ...requestactor.ownerfilter };
     if (status && ALLOWED_STATUSES.includes(status)) {
       filters.status = status;
     }
@@ -198,17 +229,15 @@ exports.getmyorders = async (req, res) => {
 
 exports.getmyorderbyid = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(String(id))) {
       return res.status(400).json({ success: false, message: "Invalid order id" });
     }
 
-    const order = await Order.findOne({ _id: id, userid }).lean();
+    const order = await Order.findOne({ _id: id, ...requestactor.ownerfilter }).lean();
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
@@ -309,4 +338,5 @@ exports.updateorderstatus = async (req, res) => {
     });
   }
 };
+
 

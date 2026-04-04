@@ -311,7 +311,7 @@ exports.verifysuperadminotp = async (req, res) => {
     }
 
     if (email !== superEmail) {
-      return res.status(401).json({ message: "Unauthorized access" })
+      return res.status(401).json({ message: "Please sign in first to continue." })
     }
 
     const record = await SuperAdminOtp.findOne({ email }).sort({ updatedAt: -1 })
@@ -613,7 +613,7 @@ try{
 const userid=req.user?.userId
 
 if(!userid){
-return res.status(401).json({message:"Unauthorized access"})
+return res.status(401).json({message:"Please sign in first to continue."})
 }
 
 const existing=await user.findById(userid).select("_id fullname email mobile role gender usersavatar avatar").lean()
@@ -639,3 +639,4 @@ avatar:existing.usersavatar||existing.avatar||""
 return res.status(500).json({message:"Failed to fetch user"})
 }
 }
+

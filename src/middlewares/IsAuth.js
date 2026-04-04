@@ -9,7 +9,7 @@ const isauth = async (req, res, next) => {
    
   
     if (!token) {
-      return res.status(401).json({ message: "Unauthorized access" });
+      return res.status(401).json({ message: "Please sign in first to continue." });
     }
     
 
@@ -21,7 +21,7 @@ const isauth = async (req, res, next) => {
     next();
   } catch (error) {
     console.error("Auth Error:", error);
-    res.status(401).json({ message: "Unauthorized access", error: error.message });
+    res.status(401).json({ message: "Please sign in first to continue.", error: error.message });
   }
 };
 

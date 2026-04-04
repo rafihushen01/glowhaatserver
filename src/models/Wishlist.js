@@ -2,12 +2,18 @@ const mongoose = require("mongoose");
 
 const wishlistSchema = new mongoose.Schema(
   {
-    userid: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
+    ownerid: {
+      type: String,
       required: true,
       index: true,
     },
+    userid: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+      default: null,
+    },
+    guestid: { type: String, default: "", index: true },
     productid: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "item",
@@ -25,6 +31,6 @@ const wishlistSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-wishlistSchema.index({ userid: 1, productid: 1 }, { unique: true });
+wishlistSchema.index({ ownerid: 1, productid: 1 }, { unique: true });
 
 module.exports = mongoose.model("wishlist", wishlistSchema);

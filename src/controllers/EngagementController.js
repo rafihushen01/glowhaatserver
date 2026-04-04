@@ -70,7 +70,7 @@ const recomputeProductRating = async (productid) => {
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
-    res.status(401).json({ success: false, message: "Unauthorized access" });
+    res.status(401).json({ success: false, message: "Please sign in first to continue." });
     return null;
   }
 
@@ -192,7 +192,7 @@ exports.createReview = async (req, res) => {
   try {
     const userid = req.user?.userId;
     if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
+      return res.status(401).json({ success: false, message: "Please sign in first to continue." });
     }
 
     const { productid } = req.params;
@@ -323,7 +323,7 @@ exports.askQuestion = async (req, res) => {
   try {
     const userid = req.user?.userId;
     if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
+      return res.status(401).json({ success: false, message: "Please sign in first to continue." });
     }
 
     const { productid } = req.params;
@@ -457,4 +457,5 @@ exports.answerQuestion = async (req, res) => {
     });
   }
 };
+
 

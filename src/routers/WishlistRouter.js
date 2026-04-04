@@ -1,5 +1,6 @@
 const express = require("express");
 const isauth = require("../middlewares/IsAuth");
+const optionalauth = require("../middlewares/OptionalAuth");
 const {
   addtowishlist,
   removewishlist,
@@ -11,13 +12,14 @@ const {
 
 const router = express.Router();
 
-router.use(isauth);
+router.use(optionalauth);
 
 router.post("/add", addtowishlist);
 router.post("/toggle", togglewishlist);
 router.delete("/remove/:productid", removewishlist);
 router.get("/my", getmywishlist);
 router.get("/status/:slug", getwishliststatus);
+router.use("/admin", isauth);
 router.get("/admin/insights", getwishlistinsightsadmin);
 
 module.exports = router;

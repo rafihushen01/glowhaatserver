@@ -36,7 +36,7 @@ const buildFilters = (query = {}) => {
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
-    res.status(401).json({ message: "Unauthorized access" });
+    res.status(401).json({ message: "Please sign in first to continue." });
     return null;
   }
 
@@ -268,3 +268,4 @@ exports.listlogs = async (req, res) => {
     return res.status(500).json({ message: error.message });
   }
 };
+

@@ -1,7 +1,9 @@
 const uploadoncloudinary = require("../utils/Cloudinary.js");
+const mongoose = require("mongoose");
 const Item = require("../models/Item.js");
 const generateUniqueSlug = require("../utils/GenerateUniqueSlug.js");
 const Nav = require("../models/Nav.js");
+const Order = require("../models/Order.js");
 
 const buildCategoryTree = async (categoryids) => {
   const categories = await Nav.find({
@@ -149,6 +151,56 @@ const extractCategoryTokens = (item) => {
   return Array.from(tokens);
 };
 
+const extractLeafCategoryNamesFromTree = (nodes = [], collector = []) => {
+  if (!Array.isArray(nodes)) return collector;
+
+  nodes.forEach((node) => {
+    if (!node || typeof node !== "object") return;
+    const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+    if (hasChildren) {
+      extractLeafCategoryNamesFromTree(node.children, collector);
+      return;
+    }
+
+    if (node.name) collector.push(node.name);
+  });
+
+  return collector;
+};
+
+const extractLeafCategoryTokens = (item) => {
+  const tokens = new Set();
+  const addToken = (value) => {
+    const slug = slugifyLoose(value);
+    if (slug) tokens.add(slug);
+  };
+
+  if (Array.isArray(item.categorytree) && item.categorytree.length) {
+    addToken(item.categorytree[item.categorytree.length - 1]);
+  }
+
+  if (typeof item.categorypath === "string" && item.categorypath.trim()) {
+    const parts = item.categorypath
+      .split(/\s*(?:>|\/|\\|,|\|)\s*/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (parts.length) addToken(parts[parts.length - 1]);
+  }
+
+  const leafNames = extractLeafCategoryNamesFromTree(item.category || []);
+  if (leafNames.length) {
+    leafNames.forEach(addToken);
+  }
+
+  if (!tokens.size) {
+    const fallbackTokens = extractCategoryTokens(item);
+    if (fallbackTokens.length) addToken(fallbackTokens[fallbackTokens.length - 1]);
+  }
+
+  return Array.from(tokens);
+};
+
 const getAllPrices = (product) => {
   const prices = [];
 
@@ -211,18 +263,9 @@ const itemBelongsToSegment = (item, slug) => {
   const normalizedSlug = slugifyLoose(slug);
   if (!normalizedSlug || normalizedSlug === "all") return true;
 
-  const slugParts = normalizedSlug.split("-").filter(Boolean);
-  const categoryTokens = extractCategoryTokens(item);
-
-  if (!categoryTokens.length) return false;
-
-  const haystack = categoryTokens.join("-");
-
-  if (categoryTokens.includes(normalizedSlug)) return true;
-  if (haystack.includes(normalizedSlug)) return true;
-  if (slugParts.length && slugParts.every((part) => haystack.includes(part))) return true;
-
-  return categoryTokens.some((token) => token.includes(normalizedSlug) || normalizedSlug.includes(token));
+  const leafTokens = extractLeafCategoryTokens(item);
+  if (!leafTokens.length) return false;
+  return leafTokens.includes(normalizedSlug);
 };
 
 const buildIncomingFilters = (source = {}) => {
@@ -315,8 +358,173 @@ const sortProducts = (products, sort) => {
     return sorted;
   }
 
+  if (sort === "oldest") {
+    sorted.sort((a, b) => new Date(a.createdAt || a.createdat || 0) - new Date(b.createdAt || b.createdat || 0));
+    return sorted;
+  }
+
+  if (sort === "most_popular" || sort === "less_popular") {
+    sorted.sort((a, b) => {
+      const aScore = Number(a.popularityscore || 0);
+      const bScore = Number(b.popularityscore || 0);
+      if (aScore === bScore) {
+        return new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0);
+      }
+      return sort === "most_popular" ? bScore - aScore : aScore - bScore;
+    });
+    return sorted;
+  }
+
   sorted.sort((a, b) => new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0));
   return sorted;
+};
+
+const buildProductPopularityMap = async (products) => {
+  if (!Array.isArray(products) || !products.length) return new Map();
+
+  const validProductIds = products
+    .map((product) => String(product?._id || ""))
+    .filter((id) => /^[a-fA-F0-9]{24}$/.test(id));
+
+  if (!validProductIds.length) return new Map();
+  const validProductObjectIds = validProductIds.map((id) => new mongoose.Types.ObjectId(id));
+
+  const [orderStats, repeatStats] = await Promise.all([
+    Order.aggregate([
+      {
+        $match: {
+          status: { $in: ["delivered", "returned", "canceled"] },
+          "items.productid": { $in: validProductObjectIds },
+        },
+      },
+      { $unwind: "$items" },
+      {
+        $match: {
+          "items.productid": { $in: validProductObjectIds },
+        },
+      },
+      {
+        $group: {
+          _id: "$items.productid",
+          deliveredqty: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "delivered"] }, { $ifNull: ["$items.quantity", 0] }, 0],
+            },
+          },
+          deliveredorders: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "delivered"] }, 1, 0],
+            },
+          },
+          canceledqty: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "canceled"] }, { $ifNull: ["$items.quantity", 0] }, 0],
+            },
+          },
+          returnedqty: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "returned"] }, { $ifNull: ["$items.quantity", 0] }, 0],
+            },
+          },
+        },
+      },
+    ]),
+    Order.aggregate([
+      {
+        $match: {
+          status: "delivered",
+          "items.productid": { $in: validProductObjectIds },
+        },
+      },
+      { $unwind: "$items" },
+      {
+        $match: {
+          "items.productid": { $in: validProductObjectIds },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            productid: "$items.productid",
+            userid: "$userid",
+          },
+          deliveredordersbyuser: { $sum: 1 },
+          deliveredqtybyuser: { $sum: { $ifNull: ["$items.quantity", 0] } },
+        },
+      },
+      {
+        $group: {
+          _id: "$_id.productid",
+          repeatcustomers: {
+            $sum: {
+              $cond: [{ $gt: ["$deliveredordersbyuser", 1] }, 1, 0],
+            },
+          },
+          repeatunits: {
+            $sum: {
+              $cond: [{ $gt: ["$deliveredordersbyuser", 1] }, "$deliveredqtybyuser", 0],
+            },
+          },
+        },
+      },
+    ]),
+  ]);
+
+  const statsByProduct = new Map();
+  orderStats.forEach((entry) => {
+    statsByProduct.set(String(entry._id), {
+      deliveredqty: Number(entry.deliveredqty || 0),
+      deliveredorders: Number(entry.deliveredorders || 0),
+      canceledqty: Number(entry.canceledqty || 0),
+      returnedqty: Number(entry.returnedqty || 0),
+      repeatcustomers: 0,
+      repeatunits: 0,
+    });
+  });
+
+  repeatStats.forEach((entry) => {
+    const key = String(entry._id);
+    const existing = statsByProduct.get(key) || {
+      deliveredqty: 0,
+      deliveredorders: 0,
+      canceledqty: 0,
+      returnedqty: 0,
+      repeatcustomers: 0,
+      repeatunits: 0,
+    };
+
+    existing.repeatcustomers = Number(entry.repeatcustomers || 0);
+    existing.repeatunits = Number(entry.repeatunits || 0);
+    statsByProduct.set(key, existing);
+  });
+
+  const scoreMap = new Map();
+  products.forEach((product) => {
+    const productId = String(product._id || "");
+    const stats = statsByProduct.get(productId) || {
+      deliveredqty: 0,
+      deliveredorders: 0,
+      canceledqty: 0,
+      returnedqty: 0,
+      repeatcustomers: 0,
+      repeatunits: 0,
+    };
+
+    const rating = Math.max(0, Math.min(5, Number(product.star || 0)));
+    const reviewCount = Math.max(0, Number(product.reviewcount || 0));
+
+    const ratingWeight = rating >= 4 ? rating * 6 : rating * 2;
+    const reviewWeight = Math.min(50, reviewCount) * 0.8;
+    const purchaseWeight = stats.deliveredqty * 3 + stats.deliveredorders * 2;
+    const repeatWeight = stats.repeatcustomers * 10 + stats.repeatunits * 2;
+    const cancelPenalty = stats.canceledqty * 3;
+    const returnPenalty = stats.returnedqty * 5;
+
+    const score = purchaseWeight + repeatWeight + ratingWeight + reviewWeight - cancelPenalty - returnPenalty;
+    scoreMap.set(productId, Number(score.toFixed(3)));
+  });
+
+  return scoreMap;
 };
 
 const getProductsBySegmentSlug = async (slug) => {
@@ -331,7 +539,9 @@ exports.createItem = async (req, res) => {
     body.variants = safeJsonParse(body.variants, []);
     body.gallery = safeJsonParse(body.gallery, []);
     body.categoryids = safeJsonParse(body.categoryids, []);
+    body.categorytree = normalizeArray(safeJsonParse(body.categorytree, body.categorytree));
     body.deliveryschema = safeJsonParse(body.deliveryschema, {});
+    body.categorypath = normalizeText(body.categorypath || body.categorytree.join(" > "));
 
     normalizeBooleanFields(body, {
       flashsale: false,
@@ -422,6 +632,24 @@ exports.edititem = async (req, res) => {
 
     if (typeof body.variants === "string") {
       body.variants = safeJsonParse(body.variants, []);
+    }
+
+    if (hasOwn(body, "categoryids")) {
+      body.categoryids = safeJsonParse(body.categoryids, []);
+    }
+
+    if (hasOwn(body, "categorytree")) {
+      body.categorytree = normalizeArray(safeJsonParse(body.categorytree, body.categorytree));
+    }
+
+    if (hasOwn(body, "categorypath")) {
+      body.categorypath = normalizeText(body.categorypath);
+    } else if (Array.isArray(body.categorytree) && body.categorytree.length) {
+      body.categorypath = body.categorytree.join(" > ");
+    }
+
+    if (Array.isArray(body.categoryids) && body.categoryids.length) {
+      body.category = await buildCategoryTree(body.categoryids);
     }
 
     const existing = await Item.findById(id);
@@ -561,12 +789,18 @@ exports.shopbycategory = async (req, res) => {
     const filters = buildIncomingFilters(req.query);
 
     const products = await getProductsBySegmentSlug(slug);
-    const filtered = sortProducts(applySegmentFilters(products, filters), filters.sort);
+    const filteredRaw = applySegmentFilters(products, filters);
+    const popularityMap = await buildProductPopularityMap(filteredRaw);
+    const filtered = filteredRaw.map((product) => ({
+      ...product,
+      popularityscore: Number(popularityMap.get(String(product._id)) || 0),
+    }));
+    const sorted = sortProducts(filtered, filters.sort);
 
     return res.status(200).json({
       success: true,
-      count: filtered.length,
-      data: filtered,
+      count: sorted.length,
+      data: sorted,
     });
   } catch (error) {
     console.error("shopbycategory error:", error);
@@ -650,12 +884,18 @@ exports.filtercategoryproduct = async (req, res) => {
     const filters = buildIncomingFilters(req.body || {});
 
     const products = await getProductsBySegmentSlug(slug);
-    const filtered = sortProducts(applySegmentFilters(products, filters), filters.sort);
+    const filteredRaw = applySegmentFilters(products, filters);
+    const popularityMap = await buildProductPopularityMap(filteredRaw);
+    const filtered = filteredRaw.map((product) => ({
+      ...product,
+      popularityscore: Number(popularityMap.get(String(product._id)) || 0),
+    }));
+    const sorted = sortProducts(filtered, filters.sort);
 
     return res.status(200).json({
       success: true,
-      count: filtered.length,
-      data: filtered,
+      count: sorted.length,
+      data: sorted,
     });
   } catch (error) {
     console.error("filtercategoryproduct error:", error);

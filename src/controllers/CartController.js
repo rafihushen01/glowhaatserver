@@ -1,6 +1,8 @@
 const sanitize = require("mongo-sanitize");
 const Cart = require("../models/Cart");
 const Item = require("../models/Item");
+const { resolveActor, recordBehaviorSignal } = require("../utils/RecommendationSignals");
+const { requireActor } = require("../utils/RequestActor");
 
 const toSafeInt = (value, fallback = 0) => {
   const n = Number(value);
@@ -16,10 +18,8 @@ const toSafePrice = (value, fallback = 0) => {
 
 exports.addtocart = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const payload = sanitize(req.body || {});
     const { slug } = payload;
@@ -58,16 +58,17 @@ exports.addtocart = async (req, res) => {
       product.gallery?.[0] ||
       "";
 
-    const filter = {
-      userid,
+    const existing = await Cart.findOne({
       productid: product._id,
       variantindex,
       optionindex,
-    };
-
-    const existing = await Cart.findOne(filter);
+      ...requestactor.ownerfilter,
+    });
 
     if (existing) {
+      existing.ownerid = requestactor.ownerid;
+      existing.userid = requestactor.userid || null;
+      existing.guestid = requestactor.guestid || "";
       existing.quantity += quantity;
       existing.unitprice = unitprice;
       existing.baseprice = baseprice;
@@ -82,6 +83,16 @@ exports.addtocart = async (req, res) => {
       };
       await existing.save();
 
+      const actor = resolveActor(req, payload);
+      if (actor) {
+        await recordBehaviorSignal({
+          actor,
+          product,
+          eventtype: "add_to_cart",
+          quantity,
+        });
+      }
+
       return res.status(200).json({
         success: true,
         message: "Cart item quantity updated",
@@ -90,7 +101,9 @@ exports.addtocart = async (req, res) => {
     }
 
     const created = await Cart.create({
-      userid,
+      ownerid: requestactor.ownerid,
+      userid: requestactor.userid || null,
+      guestid: requestactor.guestid || "",
       productid: product._id,
       slug: product.slug,
       name: product.name,
@@ -113,6 +126,16 @@ exports.addtocart = async (req, res) => {
       },
     });
 
+    const actor = resolveActor(req, payload);
+    if (actor) {
+      await recordBehaviorSignal({
+        actor,
+        product,
+        eventtype: "add_to_cart",
+        quantity,
+      });
+    }
+
     return res.status(201).json({
       success: true,
       message: "Product added to cart",
@@ -129,12 +152,10 @@ exports.addtocart = async (req, res) => {
 
 exports.getmycart = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
-    const items = await Cart.find({ userid }).sort({ updatedAt: -1 }).lean();
+    const items = await Cart.find(requestactor.ownerfilter).sort({ updatedAt: -1 }).lean();
     const subtotal = items.reduce((sum, item) => sum + toSafePrice(item.totalprice, 0), 0);
     const deliverytotal = items.reduce(
       (sum, item) => sum + toSafePrice(item.deliverycharge, 0) * toSafeInt(item.quantity, 0),
@@ -160,20 +181,21 @@ exports.getmycart = async (req, res) => {
 
 exports.updatecartquantity = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const { id } = req.params;
     const payload = sanitize(req.body || {});
     const quantity = Math.max(1, toSafeInt(payload.quantity, 1));
 
-    const item = await Cart.findOne({ _id: id, userid });
+    const item = await Cart.findOne({ _id: id, ...requestactor.ownerfilter });
     if (!item) {
       return res.status(404).json({ success: false, message: "Cart item not found" });
     }
 
+    item.ownerid = requestactor.ownerid;
+    item.userid = requestactor.userid || null;
+    item.guestid = requestactor.guestid || "";
     item.quantity = quantity;
     item.totalprice = quantity * toSafePrice(item.unitprice, 0);
     await item.save();
@@ -194,13 +216,11 @@ exports.updatecartquantity = async (req, res) => {
 
 exports.removefromcart = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const { id } = req.params;
-    const deleted = await Cart.findOneAndDelete({ _id: id, userid });
+    const deleted = await Cart.findOneAndDelete({ _id: id, ...requestactor.ownerfilter });
 
     if (!deleted) {
       return res.status(404).json({ success: false, message: "Cart item not found" });
@@ -222,12 +242,10 @@ exports.removefromcart = async (req, res) => {
 
 exports.clearcart = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
-    await Cart.deleteMany({ userid });
+    await Cart.deleteMany(requestactor.ownerfilter);
     return res.status(200).json({
       success: true,
       message: "Cart cleared successfully",
@@ -240,3 +258,4 @@ exports.clearcart = async (req, res) => {
     });
   }
 };
+

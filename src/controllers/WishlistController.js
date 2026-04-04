@@ -4,6 +4,11 @@ const Item = require("../models/Item");
 const Order = require("../models/Order");
 const User = require("../models/User");
 const Wishlist = require("../models/Wishlist");
+const {
+  resolveActor,
+  recordBehaviorSignal,
+} = require("../utils/RecommendationSignals");
+const { requireActor } = require("../utils/RequestActor");
 
 const toSafeString = (value) => (value == null ? "" : String(value).trim());
 const toSafeNumber = (value, fallback = 0) => {
@@ -14,7 +19,7 @@ const toSafeNumber = (value, fallback = 0) => {
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
-    res.status(401).json({ success: false, message: "Unauthorized access" });
+    res.status(401).json({ success: false, message: "Please sign in first to continue." });
     return null;
   }
 
@@ -59,10 +64,8 @@ const resolveProduct = async (payload = {}) => {
 
 exports.addtowishlist = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const payload = sanitize(req.body || {});
     const product = await resolveProduct(payload);
@@ -72,14 +75,19 @@ exports.addtowishlist = async (req, res) => {
 
     const prices = getDefaultPrice(product);
     const doc = await Wishlist.findOneAndUpdate(
-      { userid, productid: product._id },
+      { productid: product._id, ...requestactor.ownerfilter },
       {
         $setOnInsert: {
-          userid,
+          ownerid: requestactor.ownerid,
+          userid: requestactor.userid || null,
+          guestid: requestactor.guestid || "",
           productid: product._id,
           slug: product.slug,
         },
         $set: {
+          ownerid: requestactor.ownerid,
+          userid: requestactor.userid || null,
+          guestid: requestactor.guestid || "",
           name: toSafeString(product.name),
           brand: toSafeString(product.brand),
           image: getProductImage(product),
@@ -96,6 +104,15 @@ exports.addtowishlist = async (req, res) => {
       },
       { new: true, upsert: true }
     );
+
+    const actor = resolveActor(req, payload);
+    if (actor) {
+      await recordBehaviorSignal({
+        actor,
+        product,
+        eventtype: "wishlist_add",
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -114,17 +131,30 @@ exports.addtowishlist = async (req, res) => {
 
 exports.removewishlist = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const { productid } = req.params;
     if (!mongoose.Types.ObjectId.isValid(String(productid || ""))) {
       return res.status(400).json({ success: false, message: "Invalid product id" });
     }
 
-    await Wishlist.findOneAndDelete({ userid, productid });
+    const [deleted, product] = await Promise.all([
+      Wishlist.findOneAndDelete({ productid, ...requestactor.ownerfilter }),
+      Item.findById(productid).lean(),
+    ]);
+
+    if (deleted && product) {
+      const actor = resolveActor(req, {});
+      if (actor) {
+        await recordBehaviorSignal({
+          actor,
+          product,
+          eventtype: "wishlist_remove",
+        });
+      }
+    }
+
     return res.status(200).json({
       success: true,
       message: "Product removed from wishlist",
@@ -141,10 +171,8 @@ exports.removewishlist = async (req, res) => {
 
 exports.togglewishlist = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const payload = sanitize(req.body || {});
     const product = await resolveProduct(payload);
@@ -152,9 +180,22 @@ exports.togglewishlist = async (req, res) => {
       return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    const existing = await Wishlist.findOne({ userid, productid: product._id }).lean();
+    const existing = await Wishlist.findOne({
+      productid: product._id,
+      ...requestactor.ownerfilter,
+    }).lean();
     if (existing) {
       await Wishlist.deleteOne({ _id: existing._id });
+
+      const actor = resolveActor(req, payload);
+      if (actor) {
+        await recordBehaviorSignal({
+          actor,
+          product,
+          eventtype: "wishlist_remove",
+        });
+      }
+
       return res.status(200).json({
         success: true,
         message: "Product removed from wishlist",
@@ -164,7 +205,9 @@ exports.togglewishlist = async (req, res) => {
 
     const prices = getDefaultPrice(product);
     const created = await Wishlist.create({
-      userid,
+      ownerid: requestactor.ownerid,
+      userid: requestactor.userid || null,
+      guestid: requestactor.guestid || "",
       productid: product._id,
       slug: product.slug,
       name: toSafeString(product.name),
@@ -180,6 +223,15 @@ exports.togglewishlist = async (req, res) => {
         reviewcount: toSafeNumber(product.reviewcount, 0),
       },
     });
+
+    const actor = resolveActor(req, payload);
+    if (actor) {
+      await recordBehaviorSignal({
+        actor,
+        product,
+        eventtype: "wishlist_add",
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -198,12 +250,10 @@ exports.togglewishlist = async (req, res) => {
 
 exports.getmywishlist = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
-    const items = await Wishlist.find({ userid }).sort({ updatedAt: -1 }).lean();
+    const items = await Wishlist.find(requestactor.ownerfilter).sort({ updatedAt: -1 }).lean();
     const productids = items.map((entry) => String(entry.productid));
 
     return res.status(200).json({
@@ -223,10 +273,8 @@ exports.getmywishlist = async (req, res) => {
 
 exports.getwishliststatus = async (req, res) => {
   try {
-    const userid = req.user?.userId;
-    if (!userid) {
-      return res.status(401).json({ success: false, message: "Unauthorized access" });
-    }
+    const requestactor = requireActor(req, res);
+    if (!requestactor) return;
 
     const slug = toSafeString(req.params?.slug);
     if (!slug) {
@@ -238,7 +286,7 @@ exports.getwishliststatus = async (req, res) => {
       return res.status(404).json({ success: false, message: "Product not found" });
     }
 
-    const exists = await Wishlist.exists({ userid, productid: product._id });
+    const exists = await Wishlist.exists({ productid: product._id, ...requestactor.ownerfilter });
     return res.status(200).json({
       success: true,
       iswishlisted: Boolean(exists),
@@ -264,7 +312,7 @@ exports.getwishlistinsightsadmin = async (req, res) => {
           $group: {
             _id: "$productid",
             wishlistcount: { $sum: 1 },
-            uniqueusers: { $addToSet: "$userid" },
+            uniqueactors: { $addToSet: "$ownerid" },
             lastwishlistedat: { $max: "$createdAt" },
           },
         },
@@ -284,13 +332,13 @@ exports.getwishlistinsightsadmin = async (req, res) => {
         {
           $lookup: {
             from: "orders",
-            let: { wishuserid: "$userid", wishproductid: "$productid", wishedat: "$createdAt" },
+            let: { wishownerid: "$ownerid", wishproductid: "$productid", wishedat: "$createdAt" },
             pipeline: [
               {
                 $match: {
                   $expr: {
                     $and: [
-                      { $eq: ["$userid", "$$wishuserid"] },
+                      { $eq: ["$ownerid", "$$wishownerid"] },
                       { $eq: ["$status", "delivered"] },
                       { $gte: ["$createdAt", "$$wishedat"] },
                     ],
@@ -353,7 +401,7 @@ exports.getwishlistinsightsadmin = async (req, res) => {
         const product = productMap.get(key) || {};
         const purchases = purchaseMap.get(key) || {};
         const conversions = conversionMap.get(key) || {};
-        const uniquewishlistusers = Array.isArray(row.uniqueusers) ? row.uniqueusers.length : 0;
+        const uniquewishlistusers = Array.isArray(row.uniqueactors) ? row.uniqueactors.length : 0;
         const convertedwishlistusers = Number(conversions.convertedwishlistusers || 0);
         const conversionrate = uniquewishlistusers
           ? Number(((convertedwishlistusers / uniquewishlistusers) * 100).toFixed(2))
@@ -407,3 +455,4 @@ exports.getwishlistinsightsadmin = async (req, res) => {
     });
   }
 };
+

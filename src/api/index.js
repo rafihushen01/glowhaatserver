@@ -29,14 +29,18 @@ const userrouteradmin=require("../routers/UserRouter.js")
 const orderrouter=require("../routers/OrderRouter.js")
 const engagementrouter=require("../routers/EngagementRouter.js")
 const wishlistrouter=require("../routers/WishlistRouter.js")
+const recommendationrouter=require("../routers/RecommendationRouter.js")
 /* ===================== SOCKET.IO (REAL-TIME & FAST) ===================== */
+const normalizeOrigin = (value = "") => String(value).trim().replace(/\/+$/, "")
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  process.env.SECOND_FRONTEND_URL,
+  process.env.THIRD_FRONTEND_URL
+].map(normalizeOrigin).filter(Boolean)
+
 const io = new Server(server, {
   cors: {
-    origin: [
-      process.env.FRONTEND_URL,
-      process.env.SECOND_FRONTEND_URL,
-      process.env.THIRD_FRONTEND_URL
-    ],
+    origin: allowedOrigins.length ? allowedOrigins : true,
     credentials: true
   },
   pingTimeout: Number(process.env.SOCKET_PING_TIMEOUT) || 20000,
@@ -67,15 +71,11 @@ app.use(express.json({ limit: "10mb" })) // support large payload
 app.use(cookieparser())
 
 /* ===================== CORS (FAST + SAFE) ===================== */
-const allowedOrigins = [
-  process.env.FRONTEND_URL,
-  process.env.SECOND_FRONTEND_URL,
-  process.env.THIRD_FRONTEND_URL
-]
-
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true)
+    if (!origin) return callback(null, true)
+    if (!allowedOrigins.length) return callback(null, true)
+    if (allowedOrigins.includes(normalizeOrigin(origin))) return callback(null, true)
     return callback(null, false)
   },
   credentials: true,
@@ -88,18 +88,6 @@ app.use((req, res, next) => {
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
   res.setHeader("Pragma", "no-cache")
   res.setHeader("Expires", "0")
-  next()
-})
-
-/* ===================== REQUEST TIMEOUT PROTECTION ===================== */
-app.use((req, res, next) => {
-  const timeout = setTimeout(() => {
-    if (!res.headersSent) {
-      res.status(408).json({ message: "Request Timeout" })
-    }
-  }, Number(process.env.REQUEST_TIMEOUT) || 12000)
-
-  res.on("finish", () => clearTimeout(timeout))
   next()
 })
 
@@ -152,6 +140,7 @@ app.use("/users", userrouteradmin)
 app.use("/order", orderrouter)
 app.use("/engagement", engagementrouter)
 app.use("/wishlist", wishlistrouter)
+app.use("/recommendation", recommendationrouter)
 /* ===================== GLOBAL ERROR HANDLER ===================== */
 app.use((err, req, res, next) => {
   console.error("🔥 Server Error:", err)

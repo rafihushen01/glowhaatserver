@@ -2,12 +2,18 @@ const mongoose = require("mongoose");
 
 const cartItemSchema = new mongoose.Schema(
   {
-    userid: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "user",
+    ownerid: {
+      type: String,
       required: true,
       index: true,
     },
+    userid: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user",
+      index: true,
+      default: null,
+    },
+    guestid: { type: String, default: "", index: true },
     productid: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "item",
@@ -34,7 +40,7 @@ const cartItemSchema = new mongoose.Schema(
 );
 
 cartItemSchema.index(
-  { userid: 1, productid: 1, variantindex: 1, optionindex: 1 },
+  { ownerid: 1, productid: 1, variantindex: 1, optionindex: 1 },
   { unique: true }
 );
 

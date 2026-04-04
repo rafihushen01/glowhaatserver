@@ -26,7 +26,7 @@ const buildFrontendBaseUrl = () => {
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
-    res.status(401).json({ success: false, message: "Unauthorized access" });
+    res.status(401).json({ success: false, message: "Please sign in first to continue." });
     return null;
   }
 
@@ -462,3 +462,4 @@ exports.exportShareAnalyticsCsv = async (req, res) => {
     });
   }
 };
+

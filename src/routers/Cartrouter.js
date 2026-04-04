@@ -1,5 +1,5 @@
 const express = require("express");
-const isauth = require("../middlewares/IsAuth");
+const optionalauth = require("../middlewares/OptionalAuth");
 const {
   addtocart,
   getmycart,
@@ -10,7 +10,7 @@ const {
 
 const router = express.Router();
 
-router.use(isauth);
+router.use(optionalauth);
 router.post("/add", addtocart);
 router.get("/my", getmycart);
 router.patch("/quantity/:id", updatecartquantity);
@@ -18,4 +18,3 @@ router.delete("/remove/:id", removefromcart);
 router.delete("/clear", clearcart);
 
 module.exports = router;
-
