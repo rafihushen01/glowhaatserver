@@ -91,6 +91,13 @@ const buildCookieOptions = () => {
   }
 }
 
+const isProductionEnv = () => process.env.NODE_ENV === "production"
+
+const isSuperAdminOtpFallbackAllowed = () => {
+  if (!isProductionEnv()) return true
+  return String(process.env.SUPERADMIN_OTP_FALLBACK || "").trim().toLowerCase() === "true"
+}
+
 const signInWithUserCookie = (res, userId) => {
   const token = gentoken(userId)
   res.cookie("token", token, buildCookieOptions())
@@ -322,9 +329,32 @@ exports.requestsuperadminotp = async (req, res) => {
       { upsert: true, new: true }
     )
 
-    await sendSigninOtp(email, otp)
+    let deliveredVia = "email"
+    let fallbackReason = ""
+    let devOtp = ""
 
-    return res.status(200).json({ success: true, message: "OTP sent" })
+    try {
+      await sendSigninOtp(email, otp)
+    } catch (mailError) {
+      deliveredVia = "fallback"
+      fallbackReason = String(mailError?.code || "SMTP_SEND_FAILED")
+
+      if (!isSuperAdminOtpFallbackAllowed()) {
+        throw mailError
+      }
+
+      if (!isProductionEnv()) {
+        devOtp = otp
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: deliveredVia === "email" ? "OTP sent" : "OTP generated",
+      delivery: deliveredVia,
+      reason: fallbackReason || undefined,
+      devOtp: devOtp || undefined
+    })
   } catch (err) {
     const reason = String(err?.code || "UNKNOWN")
     console.error("SuperAdmin OTP send error:", reason, err?.message || err)

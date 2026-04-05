@@ -1,133 +1,148 @@
-const nodemailer = require("nodemailer");
-const path = require("path");
-require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
+const nodemailer = require("nodemailer")
+const dotenv = require("dotenv")
 
-const smtpUser = String(
-  process.env.OTP_GMAIL || process.env.SMTP_USER || process.env.EMAIL_USER || ""
-).trim();
-const smtpPass = String(
-  process.env.OTP_GMAIL_APP_PASS || process.env.SMTP_PASS || process.env.EMAIL_PASS || ""
-)
-  .trim()
-  .replace(/\s+/g, "");
+dotenv.config()
+
+const smtpUser = process.env.OTP_GMAIL
+const smtpPass = process.env.OTP_GMAIL_APP_PASS
 
 if (!smtpUser || !smtpPass) {
-  console.error("SMTP credentials missing. Set OTP_GMAIL/OTP_GMAIL_APP_PASS in backend .env");
+  console.error("❌ SMTP credentials missing in ENV")
 }
 
-const createTransporter = ({ secure, port, requireTLS = false }) =>
-  nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port,
-    secure,
-    requireTLS,
-    pool: false,
-    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS) || 20000,
-    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS) || 20000,
-    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS) || 30000,
-    auth: {
-      user: smtpUser,
-      pass: smtpPass,
-    },
-  });
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
 
-const primaryTransporter = createTransporter({ secure: true, port: 465 });
-const fallbackTransporter = createTransporter({ secure: false, port: 587, requireTLS: true });
+  auth: {
+    user: smtpUser,
+    pass: smtpPass,
+  },
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  connectionTimeout: 20000,
+  greetingTimeout: 20000,
+  socketTimeout: 30000,
 
-const isRetryableMailError = (error) => {
-  const retryableCodes = new Set([
-    "ETIMEDOUT",
-    "ECONNECTION",
-    "ESOCKET",
-    "ECONNRESET",
-    "EAI_AGAIN",
-  ]);
+  tls: {
+    rejectUnauthorized: false,
+  },
+})
 
-  const code = String(error?.code || "").toUpperCase();
-  return retryableCodes.has(code) || Number(error?.responseCode) >= 500;
-};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-const buildMailError = (message, code, cause) => {
-  const error = new Error(message);
-  error.code = code;
-  if (cause) error.cause = cause;
-  return error;
-};
+const sendWithRetry = async (mailOptions, retries = 3) => {
 
-const sendWithRetries = async (transporter, mailOptions, maxAttempts, label) => {
-  let lastError;
+  let lastError
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+  for (let i = 1; i <= retries; i++) {
+
     try {
-      return await transporter.sendMail(mailOptions);
+
+      const info = await transporter.sendMail(mailOptions)
+
+      return info
+
     } catch (error) {
-      lastError = error;
-      const shouldRetry = attempt < maxAttempts && isRetryableMailError(error);
-      if (!shouldRetry) break;
-      await sleep(250 * attempt);
+
+      lastError = error
+      console.error(`Mail attempt ${i} failed`)
+
+      if (i < retries) {
+        await sleep(500 * i)
+      }
+
     }
+
   }
 
-  if (lastError) {
-    lastError.message = `[${label}] ${lastError.message}`;
-  }
-  throw lastError;
-};
+  throw lastError
+}
 
-const sendMailInternal = async (type, to, otp) => {
+const sendOtpMail = async (type, to, otp) => {
+
   if (!to) {
-    throw new Error("Recipient email missing");
+    throw new Error("Recipient email missing")
   }
 
   if (!otp) {
-    throw new Error("OTP missing");
-  }
-
-  if (!smtpUser || !smtpPass) {
-    throw buildMailError("SMTP credentials are missing", "SMTP_NOT_CONFIGURED");
+    throw new Error("OTP missing")
   }
 
   const mailOptions = {
-    from: `KhanCosmetics Security Team <${smtpUser}>`,
+
+    from: `KhanCosmetics Security <${smtpUser}>`,
+
     to,
-    subject: `KhanCosmetics ${type} OTP - ${otp}`,
+
+    subject: `KhanCosmetics ${type} OTP Verification`,
+
     html: `
-      <div>
-        <h2>Do NOT share your OTP</h2>
-        <h1 style="color:green">${otp}</h1>
-        <p>Valid for 5 minutes</p>
+      <div style="
+        font-family: Arial;
+        max-width:600px;
+        margin:auto;
+        padding:20px;
+        border:1px solid #eee;
+        border-radius:10px;
+      ">
+
+        <h2 style="color:#1a1a1a">KhanCosmetics Security Code</h2>
+
+        <p>Use the OTP below to complete your <b>${type}</b> process.</p>
+
+        <div style="
+          font-size:38px;
+          font-weight:bold;
+          letter-spacing:8px;
+          color:green;
+          margin:20px 0;
+        ">
+          ${otp}
+        </div>
+
+        <p>This OTP will expire in <b>5 minutes</b>.</p>
+
+        <p style="color:red">
+          Never share this code with anyone.
+        </p>
+
         <hr/>
-        <small>Server Time: ${new Date().toISOString()}</small>
+
+        <small>
+          Generated at: ${new Date().toISOString()}
+        </small>
+
       </div>
     `,
-  };
+  }
 
   try {
-    return await sendWithRetries(primaryTransporter, mailOptions, 3, "smtp-465");
-  } catch (primaryError) {
-    try {
-      return await sendWithRetries(fallbackTransporter, mailOptions, 2, "smtp-587");
-    } catch (fallbackError) {
-      const combinedMessage = fallbackError?.message || primaryError?.message || "SMTP send failed";
-      const responseCode = Number(fallbackError?.responseCode || primaryError?.responseCode || 0);
-      if (responseCode === 535 || responseCode === 534) {
-        throw buildMailError(
-          "SMTP authentication failed. Regenerate Gmail App Password and redeploy.",
-          "SMTP_AUTH_FAILED",
-          fallbackError
-        );
-      }
-      throw buildMailError(combinedMessage, fallbackError?.code || primaryError?.code || "SMTP_SEND_FAILED", fallbackError);
-    }
+
+    await transporter.verify()
+
+    const result = await sendWithRetry(mailOptions)
+
+    return result
+
+  } catch (error) {
+
+    console.error("❌ OTP MAIL ERROR:", error)
+
+    throw new Error("OTP email sending failed")
+
   }
-};
+
+}
 
 exports.sendSignupOtp = async (to, otp) => {
-  return await sendMailInternal("Signup", to, otp);
-};
+
+  return await sendOtpMail("Signup", to, otp)
+
+}
 
 exports.sendSigninOtp = async (to, otp) => {
-  return await sendMailInternal("Signin", to, otp);
-};
+
+  return await sendOtpMail("Signin", to, otp)
+
+}
