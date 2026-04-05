@@ -166,7 +166,7 @@ exports.createCategorySlider = async (req, res) => {
     const category = new CategorySlider({
       name,
       slug,
-      navlink: `${process.env.FRONTEND_URL}/c/${slug}`, // Next.js friendly route
+      navlink: `${process.env.FRONTEND_URL}/s/${slug}`, // Next.js friendly route
       media,
       order: normalizedOrder,
       navrootid,

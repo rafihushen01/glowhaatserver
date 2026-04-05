@@ -298,7 +298,11 @@ exports.requestsuperadminotp = async (req, res) => {
     const { hasCredentials, isAuthorizedSuperAdminEmail, isAuthorizedSuperAdminPassword } = getSuperAdminConfig()
 
     if (!hasCredentials) {
-      return res.status(500).json({ message: "SuperAdmin credentials not configured" })
+      return res.status(500).json({
+        message: "SuperAdmin credentials not configured",
+        reason: "SUPERADMIN_NOT_CONFIGURED",
+        detail: "Set SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD in production env."
+      })
     }
 
     if (!email || !password) {
@@ -322,7 +326,21 @@ exports.requestsuperadminotp = async (req, res) => {
 
     return res.status(200).json({ success: true, message: "OTP sent" })
   } catch (err) {
-    return res.status(500).json({ message: "SuperAdmin OTP failed" })
+    const reason = String(err?.code || "UNKNOWN")
+    console.error("SuperAdmin OTP send error:", reason, err?.message || err)
+
+    let detail = "Email service temporary issue. Please retry in a few seconds."
+    if (reason === "SMTP_NOT_CONFIGURED") {
+      detail = "SMTP credentials are missing on server env."
+    } else if (reason === "SMTP_AUTH_FAILED") {
+      detail = "SMTP auth failed. Regenerate Gmail App Password in production env."
+    }
+
+    return res.status(500).json({
+      message: "SuperAdmin OTP failed",
+      reason,
+      detail
+    })
   }
 }
 
