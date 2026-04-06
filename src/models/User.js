@@ -47,9 +47,17 @@ mobile: {
 
     role: {
       type: String,
-      enum: ["User", "Admin", "SuperAdmin"],
+      enum: ["User", "Seller", "Admin", "SuperAdmin"],
       default: "User",
       index: true,
+    },
+    issellerverified: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    sellerapprovedat: {
+      type: Date,
     },
 
     usersignupotp: { type: String },

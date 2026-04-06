@@ -13,6 +13,7 @@ const {
   removeSegment,
   reorderSegments,
   getActiveCategorySliders,
+  getAllCategorySliders,
   getFullNavTree,
   getPublicCategoriesFull,
   rebuildAllCategoryNavpaths
@@ -39,6 +40,7 @@ router.get("/getallnavpath",rebuildAllCategoryNavpaths)
 // PUBLIC (WEBSITE)
 // =====================================================
 router.get("/active", getActiveCategorySliders);
+router.get("/all", getAllCategorySliders);
 router.get("/fulltree", getFullNavTree);
 // public route for showing up category in the website
 router.get("/public/full", getPublicCategoriesFull);

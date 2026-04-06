@@ -31,6 +31,7 @@ const orderrouter=require("../routers/OrderRouter.js")
 const engagementrouter=require("../routers/EngagementRouter.js")
 const wishlistrouter=require("../routers/WishlistRouter.js")
 const recommendationrouter=require("../routers/RecommendationRouter.js")
+const sellerrouter=require("../routers/SellerRouter.js")
 /* ===================== SOCKET.IO (REAL-TIME & FAST) ===================== */
 const normalizeOrigin = (value = "") => String(value).trim().replace(/\/+$/, "")
 const allowedOrigins = [
@@ -70,6 +71,7 @@ io.on("connection", (socket) => {
 app.use(compression()) // gzip compression → faster
 app.use(express.json({ limit: "10mb" })) // support large payload
 app.use(cookieparser())
+app.use("/public", express.static(path.join(__dirname, "../../public")))
 
 /* ===================== PUBLIC CORS (CATEGORY SHOWCASE) ===================== */
 const publicCorsPaths = new Set([
@@ -160,6 +162,7 @@ app.use("/order", orderrouter)
 app.use("/engagement", engagementrouter)
 app.use("/wishlist", wishlistrouter)
 app.use("/recommendation", recommendationrouter)
+app.use("/seller", sellerrouter)
 /* ===================== GLOBAL ERROR HANDLER ===================== */
 app.use((err, req, res, next) => {
   console.error("🔥 Server Error:", err)

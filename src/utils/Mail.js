@@ -128,3 +128,94 @@ exports.sendSignupOtp = async (to, otp) => {
 exports.sendSigninOtp = async (to, otp) => {
   return await sendOtpMail("Signin", to, otp)
 }
+
+exports.sendSellerSignupOtp = async (to, otp) => {
+  return await sendOtpMail("Seller Signup", to, otp)
+}
+
+const sendCustomMail = async ({ to, subject, html }) => {
+  if (!smtpUser || !smtpPass) {
+    const error = new Error("SMTP credentials missing")
+    error.code = "SMTP_NOT_CONFIGURED"
+    throw error
+  }
+
+  if (!to || !subject || !html) {
+    throw new Error("Mail payload missing")
+  }
+
+  const mailOptions = {
+    from: `KhanCosmetics Team <${smtpUser}>`,
+    to,
+    subject,
+    html,
+  }
+
+  return await sendWithRetry(mailOptions)
+}
+
+exports.sendSellerRequestSubmittedMail = async (to, { fullname, businessname }) => {
+  return await sendCustomMail({
+    to,
+    subject: "KhanCosmetics Seller Request Received",
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;padding:20px;border:1px solid #e6efe9;border-radius:12px;">
+        <h2 style="color:#14532d;margin:0 0 10px 0;">Your Seller Request Is In Review</h2>
+        <p>Hello <b>${fullname || "Partner"}</b>,</p>
+        <p>We received your seller onboarding request for <b>${businessname || "your business"}</b>.</p>
+        <p>Our verification team will review your credentials shortly. You can revisit the seller page anytime to check your status.</p>
+        <p style="margin-top:16px;color:#4b5563;">Thanks for choosing KhanCosmetics.</p>
+      </div>
+    `,
+  })
+}
+
+exports.sendSellerStatusUpdateMail = async (to, { status, rejectreason }) => {
+  const normalizedStatus = String(status || "").trim()
+  const body =
+    normalizedStatus === "Approved"
+      ? "<p>Congratulations. Your seller profile is now approved and verified.</p>"
+      : `<p>Your seller request was not approved at this time.</p><p><b>Reason:</b> ${rejectreason || "Not specified"}</p>`
+
+  return await sendCustomMail({
+    to,
+    subject: `KhanCosmetics Seller Request ${normalizedStatus || "Update"}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;padding:20px;border:1px solid #e6efe9;border-radius:12px;">
+        <h2 style="color:#14532d;margin:0 0 10px 0;">Seller Verification Update</h2>
+        ${body}
+        <p style="margin-top:16px;color:#4b5563;">You can visit the seller section in KhanCosmetics to view details.</p>
+      </div>
+    `,
+  })
+}
+
+exports.sendSellerRequestAlertToSuperAdmin = async (to, payload = {}) => {
+  return await sendCustomMail({
+    to,
+    subject: "New Seller Request Received",
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:700px;margin:auto;padding:20px;border:1px solid #e6efe9;border-radius:12px;">
+        <h2 style="color:#14532d;margin:0 0 10px 0;">New Seller Application</h2>
+        <p>A new seller request has been submitted in KhanCosmetics.</p>
+        <ul>
+          <li><b>Name:</b> ${payload.fullname || ""}</li>
+          <li><b>Email:</b> ${payload.email || ""}</li>
+          <li><b>Mobile:</b> ${payload.mobile || ""}</li>
+          <li><b>WhatsApp:</b> ${payload.whatsapp || ""}</li>
+          <li><b>Business:</b> ${payload.businessname || ""}</li>
+          <li><b>Business Gmail:</b> ${payload.businessgmail || ""}</li>
+          <li><b>Business Phone:</b> ${payload.businessphone || ""}</li>
+          <li><b>Store Type:</b> ${payload.storetype || ""}</li>
+          <li><b>Business Model:</b> ${payload.businessmodel || ""}</li>
+          <li><b>Preferred Categories:</b> ${payload.preferredcategories || ""}</li>
+          <li><b>Pickup District:</b> ${payload.pickupdistrict || ""}</li>
+          <li><b>Pickup City:</b> ${payload.pickupcity || ""}</li>
+          <li><b>Pickup Area:</b> ${payload.pickuparea || ""}</li>
+          <li><b>Deliveryman Phone:</b> ${payload.deliverymanphone || ""}</li>
+        </ul>
+        <p>Review it from SuperAdmin seller request dashboard.</p>
+      </div>
+    `,
+  })
+}
