@@ -32,6 +32,7 @@ const cartItemSchema = new mongoose.Schema(
     baseprice: { type: Number, default: 0, min: 0 },
     discountpercentage: { type: Number, default: 0, min: 0 },
     deliverycharge: { type: Number, default: 0, min: 0 },
+    isfreeshipping: { type: Boolean, default: false },
     quantity: { type: Number, required: true, min: 1, default: 1 },
     totalprice: { type: Number, required: true, min: 0 },
     productsnapshot: { type: Object, default: {} },

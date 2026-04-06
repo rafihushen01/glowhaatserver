@@ -6,6 +6,7 @@ const User = require("../models/User");
 const { requireActor } = require("../utils/RequestActor");
 const Item = require("../models/Item");
 const { resolveActor, recordBehaviorSignal } = require("../utils/RecommendationSignals");
+const { calculateDeliveryCharge } = require("../utils/DeliveryPricing");
 
 const ALLOWED_STATUSES = ["placed", "processing", "shipped", "delivered", "returned", "canceled"];
 const ALLOWED_PAYMENT_METHODS = ["cod", "bkash", "nagad", "bank"];
@@ -16,6 +17,31 @@ const toSafeNumber = (value, fallback = 0) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return n;
+};
+
+const resolveHasFreeDelivery = async (items) => {
+  if (!Array.isArray(items) || items.length === 0) return false;
+
+  const missingProductIds = items
+    .filter((entry) => typeof entry.isfreeshipping !== "boolean")
+    .map((entry) => entry.productid)
+    .filter(Boolean)
+    .map((entry) => String(entry));
+
+  const productMap = new Map();
+  if (missingProductIds.length) {
+    const products = await Item.find({ _id: { $in: missingProductIds } })
+      .select("_id deliveryschema.isfreeshipping")
+      .lean();
+    products.forEach((product) => {
+      productMap.set(String(product._id), Boolean(product?.deliveryschema?.isfreeshipping));
+    });
+  }
+
+  return items.every((entry) => {
+    if (typeof entry.isfreeshipping === "boolean") return entry.isfreeshipping;
+    return Boolean(productMap.get(String(entry.productid)));
+  });
 };
 
 const generateOrderNumber = () => {
@@ -88,6 +114,12 @@ exports.placeorder = async (req, res) => {
       return res.status(400).json({ success: false, message: "Cart is empty" });
     }
 
+    const hasFreeDelivery = await resolveHasFreeDelivery(cartItems);
+    const deliverytotal = calculateDeliveryCharge({
+      district,
+      hasFreeDelivery,
+    });
+
     const items = cartItems.map((item) => ({
       productid: item.productid,
       slug: item.slug || "",
@@ -101,17 +133,13 @@ exports.placeorder = async (req, res) => {
       unitprice: Math.max(0, Number(item.unitprice || 0)),
       baseprice: Math.max(0, Number(item.baseprice || 0)),
       discountpercentage: Math.max(0, Number(item.discountpercentage || 0)),
-      deliverycharge: Math.max(0, Number(item.deliverycharge || 0)),
+      deliverycharge: 0,
       quantity: Math.max(1, Number(item.quantity || 1)),
       totalprice: Math.max(0, Number(item.totalprice || 0)),
       productsnapshot: item.productsnapshot || {},
     }));
 
     const subtotal = items.reduce((sum, item) => sum + Number(item.totalprice || 0), 0);
-    const deliverytotal = items.reduce(
-      (sum, item) => sum + Number(item.deliverycharge || 0) * Number(item.quantity || 0),
-      0
-    );
     const grandtotal = subtotal + deliverytotal;
 
     let ordernumber = generateOrderNumber();
