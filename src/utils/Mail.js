@@ -10,50 +10,85 @@ if (!smtpUser || !smtpPass) {
   console.error("SMTP credentials missing in ENV")
 }
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  pool: true,
-  maxConnections: 5,
-  maxMessages: 100,
-  auth: {
-    user: smtpUser,
-    pass: smtpPass,
-  },
-  connectionTimeout: 6000,
-  greetingTimeout: 6000,
-  socketTimeout: 7000,
-  tls: {
-    rejectUnauthorized: false,
-  },
+const createTransporter = () => {
+  return nodemailer.createTransport({
+    host: "smtp.gmail.com",
+
+    // STARTTLS recommended for stability
+    port: 587,
+    secure: false,
+
+    pool: true,
+    maxConnections: 10,
+    maxMessages: 500,
+
+    auth: {
+      user: smtpUser,
+      pass: smtpPass,
+    },
+
+    // Force IPv4 (fixes Render IPv6 SMTP issue)
+    family: 4,
+
+    connectionTimeout: 20000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+
+    tls: {
+      rejectUnauthorized: false,
+    },
+  })
+}
+
+let transporter = createTransporter()
+
+// verify SMTP connection on startup
+transporter.verify((error) => {
+  if (error) {
+    console.error("SMTP verification failed:", error.message)
+  } else {
+    console.log("SMTP server ready")
+  }
 })
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const normalizeMailError = (error) => {
   const normalized = new Error(error?.message || "OTP email sending failed")
+
   normalized.code =
     error?.code ||
     error?.responseCode ||
-    (/(auth|invalid login|username and password not accepted)/i.test(String(error?.message || ""))
+    (/(auth|invalid login|username and password not accepted)/i.test(
+      String(error?.message || "")
+    )
       ? "SMTP_AUTH_FAILED"
       : "SMTP_SEND_FAILED")
+
   return normalized
 }
 
-const sendWithRetry = async (mailOptions, retries = 2) => {
+const recreateTransporter = () => {
+  console.log("Recreating SMTP transporter connection")
+  transporter = createTransporter()
+}
+
+const sendWithRetry = async (mailOptions, retries = 5) => {
   let lastError
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
-      return await transporter.sendMail(mailOptions)
+      const result = await transporter.sendMail(mailOptions)
+      return result
     } catch (error) {
       lastError = normalizeMailError(error)
+
       console.error(`Mail attempt ${attempt} failed:`, lastError.code)
 
+      recreateTransporter()
+
       if (attempt < retries) {
-        await sleep(300 * attempt)
+        await sleep(1000 * attempt)
       }
     }
   }
@@ -91,6 +126,7 @@ const sendOtpMail = async (type, to, otp) => {
       ">
         <h2 style="color:#1a1a1a">KhanCosmetics Security Code</h2>
         <p>Use the OTP below to complete your <b>${type}</b> process.</p>
+
         <div style="
           font-size:38px;
           font-weight:bold;
@@ -100,11 +136,15 @@ const sendOtpMail = async (type, to, otp) => {
         ">
           ${otp}
         </div>
+
         <p>This OTP will expire in <b>5 minutes</b>.</p>
+
         <p style="color:red">
           Never share this code with anyone.
         </p>
+
         <hr/>
+
         <small>
           Generated at: ${new Date().toISOString()}
         </small>
@@ -163,7 +203,7 @@ exports.sendSellerRequestSubmittedMail = async (to, { fullname, businessname }) 
         <h2 style="color:#14532d;margin:0 0 10px 0;">Your Seller Request Is In Review</h2>
         <p>Hello <b>${fullname || "Partner"}</b>,</p>
         <p>We received your seller onboarding request for <b>${businessname || "your business"}</b>.</p>
-        <p>Our verification team will review your credentials shortly. You can revisit the seller page anytime to check your status.</p>
+        <p>Our verification team will review your credentials shortly.</p>
         <p style="margin-top:16px;color:#4b5563;">Thanks for choosing KhanCosmetics.</p>
       </div>
     `,
@@ -172,6 +212,7 @@ exports.sendSellerRequestSubmittedMail = async (to, { fullname, businessname }) 
 
 exports.sendSellerStatusUpdateMail = async (to, { status, rejectreason }) => {
   const normalizedStatus = String(status || "").trim()
+
   const body =
     normalizedStatus === "Approved"
       ? "<p>Congratulations. Your seller profile is now approved and verified.</p>"
