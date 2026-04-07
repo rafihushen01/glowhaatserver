@@ -18,6 +18,8 @@ const sellerRequestSchema = new mongoose.Schema(
     businessname: { type: String, trim: true, required: true },
     businessgmail: { type: String, trim: true, lowercase: true, required: true },
     businessphone: { type: String, trim: true, default: "" },
+    sellerloginemail: { type: String, trim: true, lowercase: true, required: true },
+    sellerpasswordhash: { type: String, required: true },
     businessmodel: {
       type: String,
       enum: ["Physical Store", "Facebook", "Instagram", "Website", "Mixed"],

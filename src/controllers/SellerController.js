@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const path = require("path");
 const validator = require("validator");
+const bcrypt = require("bcryptjs");
 const SellerRequest = require("../models/SellerRequest");
 const SellerSignupOtp = require("../models/SellerSignupOtp");
 const User = require("../models/User");
@@ -18,6 +19,8 @@ const normalizeEmail = (value = "") => String(value).trim().toLowerCase();
 const normalizeText = (value = "") => String(value).trim();
 const normalizeMobile = (value = "") => String(value).trim();
 const isValidMobile = (value = "") => /^\+?\d{8,15}$/.test(String(value).trim());
+const MAX_TOTAL_REQUESTS = 5;
+const MAX_CONSECUTIVE_REJECTIONS = 4;
 
 const getSellerOtpHash = (otp = "") =>
   crypto.createHash("sha256").update(String(otp).trim()).digest("hex");
@@ -71,6 +74,43 @@ const findUserByAuthOrEmail = async (req, email = "") => {
   return await User.findOne({ email });
 };
 
+const getRequestAttemptMeta = async (email = "") => {
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    return {
+      totalAttempts: 0,
+      consecutiveRejections: 0,
+      hasPending: false,
+      isBlocked: false,
+      canApply: true,
+    };
+  }
+
+  const history = await SellerRequest.find({ email: safeEmail })
+    .sort({ createdAt: -1 })
+    .select("status")
+    .lean();
+
+  let consecutiveRejections = 0;
+  for (const entry of history) {
+    if (entry?.status === "Rejected") consecutiveRejections += 1;
+    else break;
+  }
+
+  const hasPending = history.some((entry) => entry?.status === "Pending");
+  const totalAttempts = history.length;
+  const isBlocked =
+    consecutiveRejections >= MAX_CONSECUTIVE_REJECTIONS || totalAttempts >= MAX_TOTAL_REQUESTS;
+
+  return {
+    totalAttempts,
+    consecutiveRejections,
+    hasPending,
+    isBlocked,
+    canApply: !hasPending && !isBlocked,
+  };
+};
+
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
@@ -92,9 +132,12 @@ exports.requestSellerOtp = async (req, res) => {
     const email = normalizeEmail(payload.email);
     const mobile = normalizeMobile(payload.mobile);
     const whatsapp = normalizeMobile(payload.whatsapp || "");
+    const sellerpassword = normalizeText(payload.sellerpassword || "");
 
-    if (!fullname || !email || !mobile) {
-      return res.status(400).json({ message: "Full name, email, and mobile are required." });
+    if (!fullname || !email || !mobile || !sellerpassword) {
+      return res
+        .status(400)
+        .json({ message: "Full name, email, mobile, and seller password are required." });
     }
 
     if (!validator.isEmail(email)) {
@@ -107,6 +150,23 @@ exports.requestSellerOtp = async (req, res) => {
 
     if (whatsapp && !isValidMobile(whatsapp)) {
       return res.status(400).json({ message: "Invalid WhatsApp number." });
+    }
+
+    if (sellerpassword.length < 6) {
+      return res.status(400).json({ message: "Seller password must be at least 6 characters." });
+    }
+
+    const attempts = await getRequestAttemptMeta(email);
+    if (attempts.hasPending) {
+      return res.status(409).json({
+        message: "Your previous seller request is still pending. Please wait for authority response.",
+      });
+    }
+    if (attempts.isBlocked) {
+      return res.status(403).json({
+        message:
+          "Dear applicant, our authority has rejected your seller requests multiple times. Seller request access is now blocked.",
+      });
     }
 
     const otp = generateOtp();
@@ -136,10 +196,15 @@ exports.verifySellerOtp = async (req, res) => {
     const email = normalizeEmail(payload.email);
     const mobile = normalizeMobile(payload.mobile);
     const whatsapp = normalizeMobile(payload.whatsapp || "");
+    const sellerpassword = normalizeText(payload.sellerpassword || "");
     const otp = normalizeText(payload.otp);
 
-    if (!fullname || !email || !mobile || !otp) {
+    if (!fullname || !email || !mobile || !otp || !sellerpassword) {
       return res.status(400).json({ message: "Missing required fields." });
+    }
+
+    if (sellerpassword.length < 6) {
+      return res.status(400).json({ message: "Seller password must be at least 6 characters." });
     }
 
     const record = await SellerSignupOtp.findOne({ email }).sort({ updatedAt: -1 });
@@ -154,12 +219,14 @@ exports.verifySellerOtp = async (req, res) => {
     }
 
     await SellerSignupOtp.deleteMany({ email });
+    const sellerpasswordhash = await bcrypt.hash(sellerpassword, 12);
 
     const stepToken = signSellerStepToken({
       fullname,
       email,
       mobile,
       whatsapp,
+      sellerpasswordhash,
       userid: req.user?.userId || null,
       purpose: "seller_step1_verified",
     });
@@ -195,11 +262,13 @@ exports.submitSellerRequest = async (req, res) => {
     const email = normalizeEmail(decoded.email);
     const mobile = normalizeMobile(decoded.mobile);
     const whatsapp = normalizeMobile(decoded.whatsapp || "");
+    const sellerpasswordhash = normalizeText(decoded.sellerpasswordhash || "");
 
     const dateofbirth = payload.dateofbirth ? new Date(payload.dateofbirth) : null;
     const storetype = normalizeText(payload.storetype);
     const businessname = normalizeText(payload.businessname);
     const businessgmail = normalizeEmail(payload.businessgmail);
+    const sellerloginemail = normalizeEmail(payload.sellerloginemail || email);
     const businessphone = normalizeMobile(payload.businessphone || "");
     const businessmodel = normalizeText(payload.businessmodel);
     const preferredcategories = Array.isArray(payload.preferredcategories)
@@ -237,8 +306,15 @@ exports.submitSellerRequest = async (req, res) => {
       return res.status(400).json({ message: "Business information is incomplete." });
     }
 
+    if (!sellerpasswordhash || !sellerloginemail) {
+      return res.status(400).json({ message: "Seller login credentials are missing." });
+    }
+
     if (!validator.isEmail(businessgmail)) {
       return res.status(400).json({ message: "Invalid business email." });
+    }
+    if (!validator.isEmail(sellerloginemail)) {
+      return res.status(400).json({ message: "Invalid seller login email." });
     }
 
     if (!pickup.district || !pickup.city || !pickup.area || !pickup.deliverymanphone) {
@@ -249,10 +325,17 @@ exports.submitSellerRequest = async (req, res) => {
       return res.status(400).json({ message: "Invalid deliveryman contact number." });
     }
 
-    const latest = await SellerRequest.findOne({ email }).sort({ createdAt: -1 }).lean();
-    if (latest?.status === "Pending") {
+    const attempts = await getRequestAttemptMeta(email);
+    if (attempts.hasPending) {
       return res.status(409).json({
-        message: "You already have a pending seller request.",
+        message: "You already have a pending seller request. Please wait for authority response.",
+      });
+    }
+
+    if (attempts.isBlocked) {
+      return res.status(403).json({
+        message:
+          "Dear applicant, our authority has rejected your seller requests multiple times. Seller request access is now blocked.",
       });
     }
 
@@ -275,6 +358,8 @@ exports.submitSellerRequest = async (req, res) => {
       businessname,
       businessgmail,
       businessphone,
+      sellerloginemail,
+      sellerpasswordhash,
       businessmodel,
       businessdetails,
       pickup,
@@ -327,12 +412,16 @@ exports.submitSellerRequest = async (req, res) => {
 exports.getSellerRequestStatus = async (req, res) => {
   try {
     const payload = sanitize(req.query || {});
-    const email = normalizeEmail(payload.email);
+    let email = normalizeEmail(payload.email);
     const userid = req.user?.userId || null;
 
     let request = null;
 
     if (userid) {
+      if (!email) {
+        const me = await User.findById(userid).select("email").lean();
+        email = normalizeEmail(me?.email || "");
+      }
       request = await SellerRequest.findOne({ userid }).sort({ createdAt: -1 }).lean();
     }
 
@@ -341,7 +430,11 @@ exports.getSellerRequestStatus = async (req, res) => {
     }
 
     if (!request) {
-      return res.status(200).json({ success: true, hasrequest: false });
+      return res.status(200).json({
+        success: true,
+        hasrequest: false,
+        meta: await getRequestAttemptMeta(email),
+      });
     }
 
     return res.status(200).json({
@@ -355,10 +448,12 @@ exports.getSellerRequestStatus = async (req, res) => {
         email: request.email,
         businessname: request.businessname,
         businessgmail: request.businessgmail,
+        sellerloginemail: request.sellerloginemail || request.email,
         storetype: request.storetype,
         createdAt: request.createdAt,
         reviewedat: request.reviewedat,
       },
+      meta: await getRequestAttemptMeta(request.email),
     });
   } catch (_error) {
     return res.status(500).json({ message: "Failed to fetch seller status." });
@@ -394,7 +489,7 @@ exports.listSellerRequestsForAdmin = async (req, res) => {
         .skip(skip)
         .limit(limit)
         .select(
-          "_id fullname email mobile whatsapp status rejectreason businessname businessgmail businessphone storetype businessmodel preferredcategories businessdetails pickup files dateofbirth createdAt reviewedat"
+          "_id fullname email mobile whatsapp status rejectreason businessname businessgmail businessphone sellerloginemail storetype businessmodel preferredcategories businessdetails pickup files dateofbirth createdAt reviewedat"
         )
         .lean(),
     ]);
@@ -435,22 +530,47 @@ exports.decideSellerRequest = async (req, res) => {
     existing.rejectreason = decision === "Rejected" ? rejectreason : "";
     existing.reviewedby = me._id;
     existing.reviewedat = new Date();
-    await existing.save();
 
-    const linkedUser =
+    const sellerLoginEmail = normalizeEmail(existing.sellerloginemail || existing.email);
+    let linkedUser =
       (existing.userid && (await User.findById(existing.userid))) ||
+      (await User.findOne({ email: sellerLoginEmail })) ||
       (await User.findOne({ email: existing.email }));
 
-    if (linkedUser) {
-      if (decision === "Approved") {
+    if (decision === "Approved") {
+      if (!linkedUser && !existing.sellerpasswordhash) {
+        return res
+          .status(400)
+          .json({ message: "Seller password missing in this request. Ask applicant to resubmit." });
+      }
+
+      if (!linkedUser) {
+        linkedUser = await User.create({
+          fullname: existing.fullname || "Seller",
+          email: sellerLoginEmail,
+          password: existing.sellerpasswordhash,
+          mobile: existing.mobile || undefined,
+          gender: "Other",
+          role: "Seller",
+          issellerverified: true,
+          sellerapprovedat: new Date(),
+        });
+      } else {
+        linkedUser.email = sellerLoginEmail || linkedUser.email;
+        if (existing.sellerpasswordhash) linkedUser.password = existing.sellerpasswordhash;
         linkedUser.role = "Seller";
         linkedUser.issellerverified = true;
         linkedUser.sellerapprovedat = new Date();
-      } else {
-        linkedUser.issellerverified = false;
+        await linkedUser.save();
       }
+
+      existing.userid = linkedUser._id;
+    } else if (linkedUser) {
+      linkedUser.issellerverified = false;
       await linkedUser.save();
     }
+
+    await existing.save();
 
     await Promise.allSettled(
       [existing.email, existing.businessgmail]
