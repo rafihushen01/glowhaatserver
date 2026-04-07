@@ -1,7 +1,8 @@
+const path = require("path")
 const nodemailer = require("nodemailer")
 const dotenv = require("dotenv")
 
-dotenv.config()
+dotenv.config({ path: path.resolve(__dirname, "../../.env"), quiet: true })
 
 const smtpUser = process.env.OTP_GMAIL
 const smtpPass = process.env.OTP_GMAIL_APP_PASS
@@ -10,52 +11,66 @@ if (!smtpUser || !smtpPass) {
   console.error("SMTP credentials missing in ENV")
 }
 
-const createTransporter = () => {
+const toBoolean = (value, fallback) => {
+  if (value === undefined) return fallback
+  return String(value).trim().toLowerCase() === "true"
+}
+
+const smtpCandidates = (() => {
+  const configuredHost = process.env.OTP_SMTP_HOST || process.env.SMTP_HOST
+  const configuredPort = Number(process.env.OTP_SMTP_PORT || process.env.SMTP_PORT || 0)
+
+  if (configuredHost && configuredPort > 0) {
+    return [
+      {
+        name: "custom-smtp",
+        host: configuredHost,
+        port: configuredPort,
+        secure: toBoolean(
+          process.env.OTP_SMTP_SECURE || process.env.SMTP_SECURE,
+          configuredPort === 465
+        ),
+      },
+    ]
+  }
+
+  return [
+    // Gmail SSL is often more stable in cloud runtimes where STARTTLS can stall.
+    { name: "gmail-ssl", host: "smtp.gmail.com", port: 465, secure: true },
+    { name: "gmail-starttls", host: "smtp.gmail.com", port: 587, secure: false },
+  ]
+})()
+
+const createTransporter = (candidate) => {
   return nodemailer.createTransport({
-    host: "smtp.gmail.com",
-
-    // STARTTLS recommended for stability
-    port: 587,
-    secure: false,
-
-    pool: true,
-    maxConnections: 10,
-    maxMessages: 500,
-
+    host: candidate.host,
+    port: candidate.port,
+    secure: candidate.secure,
+    requireTLS: !candidate.secure,
     auth: {
       user: smtpUser,
       pass: smtpPass,
     },
-
-    // Force IPv4 (fixes Render IPv6 SMTP issue)
+    pool: false,
     family: 4,
-
-    connectionTimeout: 20000,
-    greetingTimeout: 15000,
+    dnsTimeout: 15000,
+    connectionTimeout: 15000,
+    greetingTimeout: 10000,
     socketTimeout: 20000,
-
     tls: {
-      rejectUnauthorized: false,
+      rejectUnauthorized: true,
+      minVersion: "TLSv1.2",
     },
   })
 }
 
-let transporter = createTransporter()
-
-// verify SMTP connection on startup
-transporter.verify((error) => {
-  if (error) {
-    console.error("SMTP verification failed:", error.message)
-  } else {
-    console.log("SMTP server ready")
-  }
-})
+let currentTransportIndex = 0
+let transporter = createTransporter(smtpCandidates[currentTransportIndex])
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const normalizeMailError = (error) => {
   const normalized = new Error(error?.message || "OTP email sending failed")
-
   normalized.code =
     error?.code ||
     error?.responseCode ||
@@ -64,13 +79,49 @@ const normalizeMailError = (error) => {
     )
       ? "SMTP_AUTH_FAILED"
       : "SMTP_SEND_FAILED")
-
+  normalized.responseCode = error?.responseCode
   return normalized
 }
 
-const recreateTransporter = () => {
-  console.log("Recreating SMTP transporter connection")
-  transporter = createTransporter()
+const isAuthError = (error) => {
+  if (!error) return false
+  const message = String(error.message || "")
+  return (
+    error.code === "EAUTH" ||
+    error.code === "SMTP_AUTH_FAILED" ||
+    error.responseCode === 535 ||
+    /auth|invalid login|username and password not accepted/i.test(message)
+  )
+}
+
+const isTransientError = (error) => {
+  if (!error) return false
+  const transientCodes = new Set([
+    "ESOCKET",
+    "ETIMEDOUT",
+    "ECONNECTION",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "EAI_AGAIN",
+    "ENOTFOUND",
+  ])
+  return transientCodes.has(error.code) || [421, 425, 429, 450, 451, 452].includes(error.responseCode)
+}
+
+const rotateTransporter = () => {
+  currentTransportIndex = (currentTransportIndex + 1) % smtpCandidates.length
+  const nextCandidate = smtpCandidates[currentTransportIndex]
+  transporter = createTransporter(nextCandidate)
+  console.warn(
+    `Switching SMTP transport to ${nextCandidate.name} (${nextCandidate.host}:${nextCandidate.port})`
+  )
+}
+
+const refreshCurrentTransporter = () => {
+  const current = smtpCandidates[currentTransportIndex]
+  transporter = createTransporter(current)
+  console.warn(`Refreshing SMTP transport ${current.name} (${current.host}:${current.port})`)
 }
 
 const sendWithRetry = async (mailOptions, retries = 5) => {
@@ -78,22 +129,31 @@ const sendWithRetry = async (mailOptions, retries = 5) => {
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
-      const result = await transporter.sendMail(mailOptions)
-      return result
+      return await transporter.sendMail(mailOptions)
     } catch (error) {
       lastError = normalizeMailError(error)
+      console.error(`Mail attempt ${attempt} failed:`, lastError.code, lastError.message)
 
-      console.error(`Mail attempt ${attempt} failed:`, lastError.code)
+      if (isAuthError(lastError)) {
+        // Auth failures are permanent until credentials are fixed.
+        break
+      }
 
-      recreateTransporter()
+      if (smtpCandidates.length > 1 && attempt % 2 === 1) {
+        rotateTransporter()
+      } else {
+        refreshCurrentTransporter()
+      }
 
-      if (attempt < retries) {
-        await sleep(1000 * attempt)
+      if (attempt < retries && isTransientError(lastError)) {
+        await sleep(800 * attempt)
+      } else if (attempt < retries) {
+        await sleep(400 * attempt)
       }
     }
   }
 
-  throw lastError
+  throw lastError || new Error("OTP email sending failed")
 }
 
 const sendOtpMail = async (type, to, otp) => {
@@ -256,6 +316,57 @@ exports.sendSellerRequestAlertToSuperAdmin = async (to, payload = {}) => {
           <li><b>Deliveryman Phone:</b> ${payload.deliverymanphone || ""}</li>
         </ul>
         <p>Review it from SuperAdmin seller request dashboard.</p>
+      </div>
+    `,
+  })
+}
+
+exports.sendSellerSponsorshipStatusMail = async (to, { status, days, rejectreason }) => {
+  const approved = String(status) === "Verified";
+  return await sendCustomMail({
+    to,
+    subject: `KhanCosmetics Sponsorship ${approved ? "Verified" : "Rejected"}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;padding:20px;border:1px solid #e6efe9;border-radius:12px;">
+        <h2 style="color:#14532d;margin:0 0 10px 0;">Sponsorship Update</h2>
+        ${
+          approved
+            ? `<p>Your sponsorship is verified and active for <b>${Number(days || 0)} days</b>.</p>`
+            : `<p>Your sponsorship request was rejected.</p><p><b>Reason:</b> ${rejectreason || "Invalid payment proof."}</p>`
+        }
+      </div>
+    `,
+  })
+}
+
+exports.sendSellerCommissionReminderMail = async (to, { amount, dueat, bikash }) => {
+  return await sendCustomMail({
+    to,
+    subject: "KhanCosmetics Commission Due Reminder",
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;padding:20px;border:1px solid #e6efe9;border-radius:12px;">
+        <h2 style="color:#14532d;margin:0 0 10px 0;">Monthly Commission Due</h2>
+        <p>Your due commission amount is <b>৳${Number(amount || 0).toFixed(2)}</b>.</p>
+        <p>Please send payment to bKash: <b>${bikash || "01862623066"}</b></p>
+        <p>Due date: <b>${dueat ? new Date(dueat).toLocaleString() : "within 4 days"}</b></p>
+      </div>
+    `,
+  })
+}
+
+exports.sendSellerCommissionStatusMail = async (to, { status, rejectreason }) => {
+  const verified = String(status) === "Verified";
+  return await sendCustomMail({
+    to,
+    subject: `KhanCosmetics Commission Payment ${verified ? "Verified" : "Rejected"}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;padding:20px;border:1px solid #e6efe9;border-radius:12px;">
+        <h2 style="color:#14532d;margin:0 0 10px 0;">Commission Payment Status</h2>
+        ${
+          verified
+            ? "<p>Thanks for your payment. Your seller dashboard is now active again.</p>"
+            : `<p>Your payment proof was rejected.</p><p><b>Reason:</b> ${rejectreason || "Invalid payment proof."}</p>`
+        }
       </div>
     `,
   })

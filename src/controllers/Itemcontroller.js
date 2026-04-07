@@ -520,7 +520,23 @@ const buildProductPopularityMap = async (products) => {
     const cancelPenalty = stats.canceledqty * 3;
     const returnPenalty = stats.returnedqty * 5;
 
-    const score = purchaseWeight + repeatWeight + ratingWeight + reviewWeight - cancelPenalty - returnPenalty;
+    const now = Date.now();
+    const sponsorActive =
+      Boolean(product?.sponsorship?.isactive) &&
+      product?.sponsorship?.endsat &&
+      new Date(product.sponsorship.endsat).getTime() > now;
+    const sponsorWeight = sponsorActive
+      ? Number(product?.sponsorship?.boostedscore || product?.sponsorship?.amount || 0)
+      : 0;
+
+    const score =
+      purchaseWeight +
+      repeatWeight +
+      ratingWeight +
+      reviewWeight +
+      sponsorWeight -
+      cancelPenalty -
+      returnPenalty;
     scoreMap.set(productId, Number(score.toFixed(3)));
   });
 

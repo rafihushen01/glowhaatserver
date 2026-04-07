@@ -80,6 +80,26 @@ categorypath: { type: String, default: "" },
     index: true,
   },
   tags: { type: [String], default: [] },
+  sellerid: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+    index: true,
+  },
+  shopid: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "SellerShop",
+    default: null,
+    index: true,
+  },
+  isselleritem: { type: Boolean, default: false, index: true },
+  sponsorship: {
+    isactive: { type: Boolean, default: false, index: true },
+    amount: { type: Number, default: 0 },
+    startsat: { type: Date, default: null },
+    endsat: { type: Date, default: null },
+    boostedscore: { type: Number, default: 0 },
+  },
   createdat: { type: Date, default: Date.now },
 },{timestamps: true});
 

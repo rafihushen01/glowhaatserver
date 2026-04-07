@@ -5,6 +5,8 @@ const Order = require("../models/Order");
 const User = require("../models/User");
 const { requireActor } = require("../utils/RequestActor");
 const Item = require("../models/Item");
+const SellerShop = require("../models/SellerShop");
+const { attachSellerOrdersFromMainOrder } = require("./SellerPanelController");
 const { resolveActor, recordBehaviorSignal } = require("../utils/RecommendationSignals");
 const { calculateDeliveryCharge } = require("../utils/DeliveryPricing");
 
@@ -114,6 +116,39 @@ exports.placeorder = async (req, res) => {
       return res.status(400).json({ success: false, message: "Cart is empty" });
     }
 
+    const productIds = cartItems
+      .map((entry) => entry.productid)
+      .filter(Boolean)
+      .map((entry) => String(entry));
+    const products = await Item.find({ _id: { $in: productIds } })
+      .select("_id isactive shopid")
+      .lean();
+    const productMap = new Map(products.map((entry) => [String(entry._id), entry]));
+    const sellerShopIds = products
+      .map((entry) => entry.shopid)
+      .filter(Boolean)
+      .map((id) => String(id));
+
+    const sellerShops = sellerShopIds.length
+      ? await SellerShop.find({ _id: { $in: sellerShopIds } })
+          .select("_id healthisfrozen")
+          .lean()
+      : [];
+    const shopMap = new Map(sellerShops.map((entry) => [String(entry._id), entry]));
+
+    const invalidItem = cartItems.find((entry) => {
+      const product = productMap.get(String(entry.productid));
+      if (!product || !product.isactive) return true;
+      const shop = product.shopid ? shopMap.get(String(product.shopid)) : null;
+      return Boolean(shop?.healthisfrozen);
+    });
+    if (invalidItem) {
+      return res.status(400).json({
+        success: false,
+        message: "One or more items are unavailable right now. Please refresh your cart.",
+      });
+    }
+
     const hasFreeDelivery = await resolveHasFreeDelivery(cartItems);
     const deliverytotal = calculateDeliveryCharge({
       district,
@@ -187,6 +222,7 @@ exports.placeorder = async (req, res) => {
     });
 
     await Cart.deleteMany(requestactor.ownerfilter);
+    await attachSellerOrdersFromMainOrder(order);
     if (requestactor.userid) {
       await User.findByIdAndUpdate(requestactor.userid, {
         $inc: { totalorders: 1, totalspent: grandtotal },
