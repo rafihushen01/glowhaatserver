@@ -2,7 +2,7 @@ const path = require("path")
 const nodemailer = require("nodemailer")
 const dotenv = require("dotenv")
 
-dotenv.config({ path: path.resolve(__dirname, "../../.env"), quiet: true })
+dotenv.config()
 
 const smtpUser = process.env.OTP_GMAIL
 const smtpPass = process.env.OTP_GMAIL_APP_PASS
@@ -36,8 +36,8 @@ const smtpCandidates = (() => {
 
   return [
     // Gmail SSL is often more stable in cloud runtimes where STARTTLS can stall.
-    { name: "gmail-ssl", host: "smtp.gmail.com", port: 465, secure: true },
-    { name: "gmail-starttls", host: "smtp.gmail.com", port: 587, secure: false },
+ { name: "gmail-ssl", host: "74.125.24.108", port: 465, secure: true },
+{ name: "gmail-starttls", host: "74.125.24.108", port: 587, secure: false },
   ]
 })()
 
@@ -47,20 +47,24 @@ const createTransporter = (candidate) => {
     port: candidate.port,
     secure: candidate.secure,
     requireTLS: !candidate.secure,
+
     auth: {
       user: smtpUser,
       pass: smtpPass,
     },
+
     pool: false,
     family: 4,
-    dnsTimeout: 15000,
-    connectionTimeout: 15000,
+
+    connectionTimeout: 20000,
     greetingTimeout: 10000,
     socketTimeout: 20000,
+
     tls: {
       rejectUnauthorized: true,
       minVersion: "TLSv1.2",
-    },
+      servername: "smtp.gmail.com"
+    }
   })
 }
 
