@@ -1,14 +1,20 @@
 const path = require("path")
 const nodemailer = require("nodemailer")
 const dotenv = require("dotenv")
+const { isResendConfigured, sendWithResend } = require("./Resend")
 
-dotenv.config()
+dotenv.config({ path: path.resolve(__dirname, "../../.env") })
 
 const smtpUser = process.env.OTP_GMAIL
 const smtpPass = process.env.OTP_GMAIL_APP_PASS
+const resendEnabled = isResendConfigured()
 
 if (!smtpUser || !smtpPass) {
   console.error("SMTP credentials missing in ENV")
+}
+
+if (!resendEnabled) {
+  console.warn("Resend fallback is not configured")
 }
 
 const toBoolean = (value, fallback) => {
@@ -84,6 +90,17 @@ const normalizeMailError = (error) => {
       ? "SMTP_AUTH_FAILED"
       : "SMTP_SEND_FAILED")
   normalized.responseCode = error?.responseCode
+  normalized.provider = error?.provider
+  return normalized
+}
+
+const normalizeFallbackError = (smtpError, resendError) => {
+  const normalized = new Error(
+    `SMTP failed (${smtpError?.code || "SMTP_SEND_FAILED"}) and Resend failed (${resendError?.code || "RESEND_SEND_FAILED"})`
+  )
+  normalized.code = "MAIL_DELIVERY_FAILED"
+  normalized.smtpError = smtpError
+  normalized.resendError = resendError
   return normalized
 }
 
@@ -160,13 +177,49 @@ const sendWithRetry = async (mailOptions, retries = 5) => {
   throw lastError || new Error("OTP email sending failed")
 }
 
-const sendOtpMail = async (type, to, otp) => {
-  if (!smtpUser || !smtpPass) {
-    const error = new Error("SMTP credentials missing")
-    error.code = "SMTP_NOT_CONFIGURED"
-    throw error
+const sendViaSmtpThenResend = async (mailOptions, resendOptions = {}) => {
+  let smtpError = null
+
+  if (smtpUser && smtpPass) {
+    try {
+      const smtpResult = await sendWithRetry(mailOptions)
+      return {
+        provider: "smtp",
+        raw: smtpResult,
+      }
+    } catch (error) {
+      smtpError = normalizeMailError(error)
+      console.error(
+        "Primary SMTP delivery failed. Trying Resend fallback:",
+        smtpError.code,
+        smtpError.message
+      )
+    }
+  } else {
+    smtpError = new Error("SMTP credentials missing")
+    smtpError.code = "SMTP_NOT_CONFIGURED"
+    console.error("SMTP unavailable. Trying Resend fallback:", smtpError.code)
   }
 
+  if (!resendEnabled) {
+    throw smtpError
+  }
+
+  try {
+    return await sendWithResend({
+      to: resendOptions.to || mailOptions.to,
+      subject: resendOptions.subject || mailOptions.subject,
+      html: resendOptions.html || mailOptions.html,
+      text: resendOptions.text,
+      tags: resendOptions.tags,
+    })
+  } catch (resendError) {
+    console.error("Resend fallback failed:", resendError.code, resendError.message)
+    throw normalizeFallbackError(smtpError, resendError)
+  }
+}
+
+const sendOtpMail = async (type, to, otp) => {
   if (!to) {
     throw new Error("Recipient email missing")
   }
@@ -217,7 +270,13 @@ const sendOtpMail = async (type, to, otp) => {
   }
 
   try {
-    return await sendWithRetry(mailOptions)
+    return await sendViaSmtpThenResend(mailOptions, {
+      text: `${type} OTP: ${otp}. This code expires in 5 minutes.`,
+      tags: [
+        { name: "category", value: "otp" },
+        { name: "type", value: String(type || "general").toLowerCase().replace(/\s+/g, "-") },
+      ],
+    })
   } catch (error) {
     const normalizedError = normalizeMailError(error)
     console.error("OTP MAIL ERROR:", normalizedError.code, normalizedError.message)
@@ -238,12 +297,6 @@ exports.sendSellerSignupOtp = async (to, otp) => {
 }
 
 const sendCustomMail = async ({ to, subject, html }) => {
-  if (!smtpUser || !smtpPass) {
-    const error = new Error("SMTP credentials missing")
-    error.code = "SMTP_NOT_CONFIGURED"
-    throw error
-  }
-
   if (!to || !subject || !html) {
     throw new Error("Mail payload missing")
   }
@@ -255,7 +308,9 @@ const sendCustomMail = async ({ to, subject, html }) => {
     html,
   }
 
-  return await sendWithRetry(mailOptions)
+  return await sendViaSmtpThenResend(mailOptions, {
+    tags: [{ name: "category", value: "transactional" }],
+  })
 }
 
 exports.sendSellerRequestSubmittedMail = async (to, { fullname, businessname }) => {
