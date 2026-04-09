@@ -97,7 +97,7 @@ mobile: {
       default: "",
     },
 
-    damasktoken: {
+    khantoken: {
       type: Number,
       default: 0,
     },

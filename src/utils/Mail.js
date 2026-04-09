@@ -1,7 +1,7 @@
 const path = require("path")
 const nodemailer = require("nodemailer")
 const dotenv = require("dotenv")
-const { isResendConfigured, sendWithResend } = require("./Resend")
+const { isResendConfigured, sendWithResend } = require("./Resend.js")
 
 dotenv.config({ path: path.resolve(__dirname, "../../.env") })
 

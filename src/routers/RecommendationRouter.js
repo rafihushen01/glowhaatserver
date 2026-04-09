@@ -4,6 +4,7 @@ const isauth = require("../middlewares/IsAuth");
 const {
   trackRecommendationEvent,
   getPersonalizedRecommendations,
+  getProductPageRecommendations,
   getRecommendationInsightsAdmin,
 } = require("../controllers/RecommendationController");
 
@@ -11,6 +12,7 @@ const router = express.Router();
 
 router.post("/track", optionalauth, trackRecommendationEvent);
 router.get("/for-you", optionalauth, getPersonalizedRecommendations);
+router.get("/product-page/:slug", optionalauth, getProductPageRecommendations);
 router.get("/admin/insights", isauth, getRecommendationInsightsAdmin);
 
 module.exports = router;

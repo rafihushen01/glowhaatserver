@@ -86,6 +86,21 @@ const getReason = ({ categoryBoost, brandBoost, signalBoost, orderBoost, popular
   return "Picked for you";
 };
 
+const escapeRegExp = (value) =>
+  toSafeString(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const getLogBoost = (value) => Math.log1p(Math.max(0, Number(value || 0)));
+
+const buildItemCard = (item, extras = {}) => ({
+  ...item,
+  recommendationmeta: {
+    score: Number(Number(extras.score || 0).toFixed(3)),
+    reason: toSafeString(extras.reason),
+    confidence: Number(Number(extras.confidence || 0).toFixed(3)),
+    ...extras,
+  },
+});
+
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
@@ -343,6 +358,309 @@ exports.getPersonalizedRecommendations = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to generate recommendations",
+      error: error.message,
+    });
+  }
+};
+
+exports.getProductPageRecommendations = async (req, res) => {
+  try {
+    const params = sanitize(req.params || {});
+    const query = sanitize(req.query || {});
+    const slug = toSafeString(params.slug);
+    const sectionlimit = clamp(toSafeNumber(query.sectionlimit, 12), 4, 24);
+
+    if (!slug) {
+      return res.status(400).json({ success: false, message: "Product slug is required" });
+    }
+
+    const product = await Item.findOne({ slug, isactive: true })
+      .select(
+        "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath createdAt createdat"
+      )
+      .lean();
+
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found" });
+    }
+
+    const productId = product._id;
+    const targetCategoryTokens = extractCategoryTokens(product);
+    const targetBrand = toSafeString(product.brand).toLowerCase();
+    const targetPrice = getLowestPrice(product);
+    const categoryLeafRaw = Array.isArray(product.categorytree) && product.categorytree.length
+      ? toSafeString(product.categorytree[product.categorytree.length - 1])
+      : toSafeString(product.categorypath).split(/\s*(?:>|\/|\\|,|\|)\s*/).filter(Boolean).pop() || "";
+    const leafRegex = categoryLeafRaw ? new RegExp(escapeRegExp(categoryLeafRaw), "i") : null;
+
+    const [targetOrderCountAgg, boughtTogetherAgg, alsoViewedBaseAgg] = await Promise.all([
+      Order.aggregate([
+        { $match: { status: "delivered", "items.productid": productId } },
+        { $count: "count" },
+      ]),
+      Order.aggregate([
+        { $match: { status: "delivered", "items.productid": productId } },
+        { $unwind: "$items" },
+        { $match: { "items.productid": { $ne: productId } } },
+        {
+          $group: {
+            _id: "$items.productid",
+            togetherorders: { $sum: 1 },
+            togetherqty: { $sum: { $ifNull: ["$items.quantity", 0] } },
+          },
+        },
+        { $sort: { togetherorders: -1, togetherqty: -1 } },
+        { $limit: 200 },
+      ]),
+      UserProductBehavior.aggregate([
+        {
+          $match: {
+            productid: productId,
+            $or: [{ detailviewcount: { $gt: 0 } }, { clickcount: { $gt: 0 } }],
+          },
+        },
+        {
+          $project: {
+            actorid: 1,
+            actorweight: {
+              $add: [
+                { $multiply: [{ $ifNull: ["$detailviewcount", 0] }, 2] },
+                { $ifNull: ["$clickcount", 0] },
+                { $multiply: [{ $ifNull: ["$wishlistadds", 0] }, 2] },
+                { $multiply: [{ $ifNull: ["$cartadds", 0] }, 3] },
+              ],
+            },
+          },
+        },
+        { $sort: { actorweight: -1 } },
+        { $limit: 1800 },
+      ]),
+    ]);
+
+    const targetOrderCount = Number(targetOrderCountAgg?.[0]?.count || 0);
+
+    const boughtTogetherIds = boughtTogetherAgg.map((row) => row._id);
+    const alsoViewedActors = alsoViewedBaseAgg
+      .map((row) => toSafeString(row.actorid))
+      .filter(Boolean);
+
+    const alsoViewedAggPromise = alsoViewedActors.length
+      ? UserProductBehavior.aggregate([
+          {
+            $match: {
+              actorid: { $in: alsoViewedActors },
+              productid: { $ne: productId },
+            },
+          },
+          {
+            $group: {
+              _id: "$productid",
+              totalscore: { $sum: "$signalscore" },
+              totalviews: { $sum: "$detailviewcount" },
+              totalclicks: { $sum: "$clickcount" },
+              uniqueactors: { $addToSet: "$actorid" },
+            },
+          },
+          { $sort: { totalscore: -1, totalviews: -1, totalclicks: -1 } },
+          { $limit: 300 },
+        ])
+      : Promise.resolve([]);
+
+    const similarityOr = [
+      ...(targetBrand
+        ? [{ brand: { $regex: new RegExp(`^${escapeRegExp(product.brand)}$`, "i") } }]
+        : []),
+      ...(Array.isArray(product.categorytree) && product.categorytree.length
+        ? [{ categorytree: { $in: product.categorytree } }]
+        : []),
+      ...(leafRegex ? [{ categorypath: leafRegex }] : []),
+    ];
+
+    const similarityQuery = {
+      isactive: true,
+      _id: { $ne: productId },
+      ...(similarityOr.length ? { $or: similarityOr } : {}),
+    };
+
+    const [similarCandidates, boughtTogetherItems, alsoViewedAgg, dealCandidates] = await Promise.all([
+      Item.find(similarityQuery)
+        .select(
+          "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath createdAt createdat"
+        )
+        .limit(700)
+        .lean(),
+      boughtTogetherIds.length
+        ? Item.find({ _id: { $in: boughtTogetherIds }, isactive: true })
+            .select(
+              "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath createdAt createdat"
+            )
+            .lean()
+        : Promise.resolve([]),
+      alsoViewedAggPromise,
+      Item.find({ _id: { $ne: productId }, isactive: true })
+        .select(
+          "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath createdAt createdat"
+        )
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .limit(1200)
+        .lean(),
+    ]);
+
+    const productMapById = new Map();
+    [...similarCandidates, ...boughtTogetherItems, ...dealCandidates].forEach((entry) => {
+      productMapById.set(String(entry._id), entry);
+    });
+
+    const frequentlyBoughtTogether = boughtTogetherAgg
+      .map((row) => {
+        const item = productMapById.get(String(row._id));
+        if (!item) return null;
+        const togetherorders = Number(row.togetherorders || 0);
+        const togetherqty = Number(row.togetherqty || 0);
+        const confidence = targetOrderCount > 0 ? togetherorders / targetOrderCount : 0;
+        const score = togetherorders * 4 + togetherqty * 1.7 + confidence * 20;
+        return buildItemCard(item, {
+          score,
+          reason: "Frequently bought together by delivered customers",
+          confidence,
+          togetherorders,
+          togetherqty,
+        });
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.recommendationmeta.score - a.recommendationmeta.score)
+      .slice(0, sectionlimit);
+
+    const similarItems = similarCandidates
+      .map((item) => {
+        const tokens = extractCategoryTokens(item);
+        const overlapCount = tokens.filter((token) => targetCategoryTokens.includes(token)).length;
+        const tokenMatchRatio = targetCategoryTokens.length
+          ? overlapCount / targetCategoryTokens.length
+          : 0;
+        const sameBrand = toSafeString(item.brand).toLowerCase() === targetBrand ? 1 : 0;
+        const itemPrice = getLowestPrice(item);
+        let priceSimilarity = 0;
+        if (targetPrice > 0 && itemPrice > 0) {
+          const ratio = Math.abs(itemPrice - targetPrice) / targetPrice;
+          if (ratio <= 0.15) priceSimilarity = 1;
+          else if (ratio <= 0.35) priceSimilarity = 0.6;
+          else if (ratio <= 0.55) priceSimilarity = 0.3;
+        }
+
+        const score =
+          tokenMatchRatio * 70 +
+          sameBrand * 18 +
+          priceSimilarity * 12 +
+          clamp(toSafeNumber(item.star, 0), 0, 5) * 2.5 +
+          getLogBoost(item.reviewcount) * 1.7 +
+          getLogBoost(item.totalsold) * 2.2;
+
+        return buildItemCard(item, {
+          score,
+          reason: sameBrand
+            ? "Similar category and same brand"
+            : "Similar category and matching customer taste",
+          confidence: Math.min(1, tokenMatchRatio + sameBrand * 0.15 + priceSimilarity * 0.1),
+          overlapcount: overlapCount,
+          samebrand: Boolean(sameBrand),
+          pricesimilarity: Number(priceSimilarity.toFixed(3)),
+        });
+      })
+      .sort((a, b) => b.recommendationmeta.score - a.recommendationmeta.score)
+      .slice(0, sectionlimit);
+
+    const alsoViewedItems = alsoViewedAgg
+      .map((row) => {
+        const item = productMapById.get(String(row._id));
+        if (!item) return null;
+        const uniqueactors = Array.isArray(row.uniqueactors) ? row.uniqueactors.length : 0;
+        const totalscore = Number(row.totalscore || 0);
+        const totalviews = Number(row.totalviews || 0);
+        const totalclicks = Number(row.totalclicks || 0);
+        const score =
+          totalscore * 1.5 + totalviews * 2.3 + totalclicks * 1.6 + uniqueactors * 2.1;
+        return buildItemCard(item, {
+          score,
+          reason: "Customers who viewed this also visited this item",
+          confidence: Math.min(1, uniqueactors / Math.max(10, alsoViewedActors.length)),
+          uniqueactors,
+          totalviews,
+          totalclicks,
+        });
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.recommendationmeta.score - a.recommendationmeta.score)
+      .slice(0, sectionlimit);
+
+    const actor = resolveActor(req, query);
+    const userSignals = actor?.actorid
+      ? await UserProductBehavior.find({ actorid: actor.actorid })
+          .sort({ signalscore: -1, lastinteractedat: -1 })
+          .limit(220)
+          .lean()
+      : [];
+    const affinity = buildUserAffinity(userSignals);
+
+    const dealsYouCantMiss = dealCandidates
+      .map((item) => {
+        const discount = getTopDiscount(item);
+        if (discount <= 0) return null;
+
+        const tokens = extractCategoryTokens(item);
+        const tokenMatch = tokens.reduce(
+          (sum, token) => sum + Number(affinity.categoryWeight.get(token) || 0),
+          0
+        );
+        const brandBoost =
+          toSafeString(item.brand).toLowerCase() &&
+          affinity.brandWeight.get(toSafeString(item.brand).toLowerCase())
+            ? Number(affinity.brandWeight.get(toSafeString(item.brand).toLowerCase()))
+            : 0;
+
+        const score =
+          discount * 3.4 +
+          clamp(toSafeNumber(item.star, 0), 0, 5) * 3 +
+          getLogBoost(item.reviewcount) * 2.5 +
+          getLogBoost(item.totalsold) * 2 +
+          Math.min(18, tokenMatch * 0.2) +
+          Math.min(8, brandBoost * 0.15);
+
+        return buildItemCard(item, {
+          score,
+          reason: "High discount with strong customer performance",
+          confidence: Math.min(1, discount / 100 + clamp(toSafeNumber(item.star, 0), 0, 5) / 8),
+          discount,
+        });
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.recommendationmeta.score - a.recommendationmeta.score)
+      .slice(0, sectionlimit);
+
+    return res.status(200).json({
+      success: true,
+      product: {
+        _id: product._id,
+        slug: product.slug,
+        name: product.name,
+      },
+      sections: {
+        frequentlyboughttogether: frequentlyBoughtTogether,
+        similaritems: similarItems,
+        alsoviewed: alsoViewedItems,
+        dealsyoucantmiss: dealsYouCantMiss,
+      },
+      meta: {
+        sectionlimit,
+        targetordercount: targetOrderCount,
+        sourceactors: alsoViewedActors.length,
+        personalized: Boolean(actor?.actorid && userSignals.length),
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch product recommendations",
       error: error.message,
     });
   }
