@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const sellercommissionconfigSchema = new mongoose.Schema(
   {
     globalpercentage: { type: Number, default: 5, min: 0, max: 100 },
+    khancommissionpercentage: { type: Number, default: 10, min: 0, max: 100 },
     selleroverrides: {
       type: [
         {

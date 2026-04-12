@@ -4,6 +4,7 @@ const optionalauth = require("../middlewares/OptionalAuth");
 const upload = require("../middlewares/Multer");
 const { otpLimiter } = require("../utils/RateLimit");
 const {
+  startSellerOnboarding,
   requestSellerOtp,
   verifySellerOtp,
   submitSellerRequest,
@@ -33,7 +34,9 @@ const {
   decideSponsorshipRequest,
   getAdminCommissionConfig,
   setGlobalCommissionPercent,
+  setKhanCommissionPercent,
   setSellerCommissionPercent,
+  getAdminKhanCommissionSummary,
   getAdminCommissionPayments,
   decideCommissionPayment,
   updateShopHealth,
@@ -45,6 +48,7 @@ const {
 
 const router = express.Router();
 
+router.post("/start", optionalauth, startSellerOnboarding);
 router.post("/request-otp", otpLimiter, optionalauth, requestSellerOtp);
 router.post("/verify-otp", optionalauth, verifySellerOtp);
 router.post(
@@ -115,7 +119,9 @@ router.get("/admin/panel/sponsorships", isauth, getAdminSponsorshipRequests);
 router.patch("/admin/panel/sponsorships/:id/decision", isauth, decideSponsorshipRequest);
 router.get("/admin/panel/commission-config", isauth, getAdminCommissionConfig);
 router.patch("/admin/panel/commission-config/global", isauth, setGlobalCommissionPercent);
+router.patch("/admin/panel/commission-config/khan", isauth, setKhanCommissionPercent);
 router.patch("/admin/panel/commission-config/seller/:sellerid", isauth, setSellerCommissionPercent);
+router.get("/admin/panel/commission/khan-summary", isauth, getAdminKhanCommissionSummary);
 router.get("/admin/panel/commission-payments", isauth, getAdminCommissionPayments);
 router.patch("/admin/panel/commission-payments/:id/decision", isauth, decideCommissionPayment);
 router.patch("/admin/panel/shops/:shopid/health", isauth, updateShopHealth);

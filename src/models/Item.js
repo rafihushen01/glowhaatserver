@@ -93,6 +93,7 @@ categorypath: { type: String, default: "" },
     index: true,
   },
   isselleritem: { type: Boolean, default: false, index: true },
+  iskhanproduct: { type: Boolean, default: true, index: true },
   sponsorship: {
     isactive: { type: Boolean, default: false, index: true },
     amount: { type: Number, default: 0 },

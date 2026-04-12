@@ -1,11 +1,10 @@
 const sanitize = require("mongo-sanitize")
 const user = require("../models/User")
-const signupotpmodel = require("../models/SignupOtp")
 const bcrypt = require("bcryptjs")
 const validator = require("validator")
 const gentoken = require("../utils/Token")
 const crypto = require("crypto")
-const { sendSignupOtp, sendSigninOtp } = require("../utils/Mail")
+const { sendSigninOtp } = require("../utils/Mail")
 const SuperAdminOtp = require("../models/SuperAdminOtp")
 const { verifyFirebaseIdToken } = require("../utils/FirebaseAdmin")
 
@@ -35,6 +34,11 @@ const normalizePassword = (value = "") => {
 
 const normalizeMobile = (value = "") => {
   return String(value).trim()
+}
+
+const isValidPassword = (value = "") => {
+  const password = String(value || "")
+  return password.length >= 8 && /[A-Za-z]/.test(password) && /\d/.test(password)
 }
 
 const isValidMobile = (value = "") => {
@@ -103,6 +107,34 @@ const signInWithUserCookie = (res, userId) => {
   res.cookie("token", token, buildCookieOptions())
 }
 
+const ensureSuperAdminUser = async () => {
+  const {
+    superEmail,
+    superPass,
+    superName,
+  } = getSuperAdminConfig()
+
+  let existing = await user.findOne({ email: superEmail })
+  const hashed = await bcrypt.hash(String(superPass), 12)
+
+  if (!existing) {
+    existing = await user.create({
+      fullname: superName,
+      email: superEmail,
+      password: hashed,
+      role: "SuperAdmin",
+      gender: "Other",
+    })
+  } else {
+    existing.password = hashed
+    existing.role = "SuperAdmin"
+    existing.fullname = existing.fullname || superName
+    await existing.save()
+  }
+
+  return existing
+}
+
 const pickDefaultAvatarFromGender = (gender = "Other") => {
   if (gender === "Male") return "/Men.png"
   if (gender === "Female") return "/women.jpg"
@@ -113,12 +145,15 @@ const pickDefaultAvatarFromGender = (gender = "Other") => {
 
 exports.requestsignupotp = async(req,res)=>{
 try{
-
 const payload=sanitize(req.body||{})
-const {fullname,password,mobile,gender,role}=payload
+const fullname=String(payload.fullname||"").trim()
 const email=normalizeEmail(payload.email)
+const password=String(payload.password||"")
+const mobile=normalizeMobile(payload.mobile||"")
+const gender=String(payload.gender||"").trim()
+const role=String(payload.role||"User").trim()||"User"
 
-if(!fullname||!email||!password||!gender||!role){
+if(!fullname||!email||!password||!gender){
 return res.status(400).json({message:"Missing fields"})
 }
 
@@ -126,99 +161,43 @@ if(!validator.isEmail(email)){
 return res.status(400).json({message:"Invalid email"})
 }
 
+if(!isValidPassword(password)){
+return res.status(400).json({message:"Password must be at least 8 characters and include letters and numbers"})
+}
+
+if(mobile&&!isValidMobile(mobile)){
+return res.status(400).json({message:"Invalid mobile number format"})
+}
+
+if(!["Male","Female","Other"].includes(gender)){
+return res.status(400).json({message:"Invalid gender"})
+}
+
+if(!["User","Seller"].includes(role)){
+return res.status(400).json({message:"Invalid role"})
+}
+
 const existing=await user.findOne({email}).select("_id").lean()
-
 if(existing){
-return res.status(409).json({
-message:"Account already exists please signin"
-})
+return res.status(409).json({message:"Account already exists please signin"})
 }
-
-const otp=generateotp()
-const otpHash=hashotp(otp)
-
-await signupotpmodel.findOneAndUpdate(
-{email},
-{
-email,
-fullname,
-password:await bcrypt.hash(String(password),12),
-mobile,
-gender,
-role,
-otp:otpHash,
-expire:new Date(Date.now()+5*60*1000)
-},
-{upsert:true,new:true}
-)
-
-await sendSignupOtp(email,otp)
-
-return res.status(200).json({
-success:true,
-message:"OTP sent"
-})
-
-}catch(err){
-return res.status(500).json({message:"Signup OTP error"})
-}
-}
-
-
-
-exports.verifysignupotp = async(req,res)=>{
-try{
-
-const payload=sanitize(req.body||{})
-const email=normalizeEmail(payload.email)
-const otp=normalizeOtp(payload.otp)
-
-if(!email||!otp){
-return res.status(400).json({message:"Missing email or OTP"})
-}
-
-const record=await signupotpmodel.findOne({email}).sort({updatedAt:-1})
-
-if(!record){
-return res.status(400).json({message:"Invalid request"})
-}
-
-if(!record.expire||record.expire.getTime()<Date.now()){
-return res.status(400).json({message:"OTP expired"})
-}
-
-const otpHash=hashotp(otp)
-
-if(otpHash!==record.otp){
-return res.status(400).json({message:"Invalid OTP"})
-}
-
-let avatar=""
-
-if(record.gender==="Male") avatar="/Men.png"
-if(record.gender==="Female") avatar="/women.jpg"
-if(record.gender==="Other") avatar="/Third.webp"
 
 const studentid=generateSecureStudentId()
+const avatar=pickDefaultAvatarFromGender(gender)
+const hashedPassword=await bcrypt.hash(password,12)
 
 const newuser=await user.create({
-
-fullname:record.fullname,
-email:record.email,
-password:record.password,
-mobile:record.mobile,
-gender:record.gender,
-role:record.role,
+fullname,
+email,
+password:hashedPassword,
+mobile:mobile||undefined,
+gender,
+role,
 studentid,
 avatar
-
 })
 
-await signupotpmodel.deleteMany({email})
-
-const token=gentoken(newuser._id)
-
-res.cookie("token",token,buildCookieOptions())
+signInWithUserCookie(res,newuser._id)
 
 return res.status(201).json({
 success:true,
@@ -232,10 +211,15 @@ role:newuser.role,
 gender:newuser.gender
 }
 })
-
 }catch(err){
-return res.status(500).json({message:"Verification failed"})
+return res.status(500).json({message:"Signup failed"})
 }
+}
+
+
+
+exports.verifysignupotp = async(req,res)=>{
+return res.status(410).json({message:"OTP signup is disabled. Please use email and password signup."})
 }
 
 
@@ -253,17 +237,21 @@ if(!email||!password){
 return res.status(400).json({message:"Missing email or password"})
 }
 
-// SuperAdmin hidden flow (no public toggle)
+// SuperAdmin hidden flow (direct signin, OTP disabled for website auth)
 if (hasCredentials && isAuthorizedSuperAdminEmail(email) && isAuthorizedSuperAdminPassword(password)) {
-  const otp = generateotp()
-  const otpHash = hashotp(otp)
-  await SuperAdminOtp.findOneAndUpdate(
-    { email },
-    { email, otp: otpHash, expire: new Date(Date.now() + 5 * 60 * 1000) },
-    { upsert: true, new: true }
-  )
-  await sendSigninOtp(email, otp)
-  return res.status(200).json({ message: "OTP sent" })
+  const existing = await ensureSuperAdminUser()
+  signInWithUserCookie(res, existing._id)
+  return res.status(200).json({
+    success: true,
+    message: "Signin successful",
+    user: {
+      id: existing._id,
+      fullname: existing.fullname,
+      email: existing.email,
+      role: existing.role,
+      gender: existing.gender || "Other",
+    },
+  })
 }
 
 const existing=await user.findOne({email})
@@ -278,21 +266,24 @@ if(!match){
 return res.status(400).json({message:"Invalid credentials"})
 }
 
-const otp=generateotp()
-const otpHash=hashotp(otp)
+signInWithUserCookie(res, existing._id)
 
-existing.signinotp=otpHash
-existing.signinotpexpires=new Date(Date.now()+5*60*1000)
-
-await existing.save()
-
-await sendSigninOtp(email,otp)
-
-return res.status(200).json({message:"OTP sent"})
+return res.status(200).json({
+success:true,
+message:"Signin successful",
+user:{
+id:existing._id,
+fullname:existing.fullname,
+email:existing.email,
+mobile:existing.mobile||"",
+role:existing.role,
+gender:existing.gender
+}
+})
 
 }catch(err){
 if (res.headersSent) return
-return res.status(500).json({message:"Signin OTP failed"})
+return res.status(500).json({message:"Signin failed"})
 }
 }
 
@@ -374,19 +365,52 @@ exports.requestsuperadminotp = async (req, res) => {
   }
 }
 
+exports.superadminsignin = async (req, res) => {
+  try {
+    const payload = sanitize(req.body || {})
+    const email = normalizeEmail(payload.email)
+    const password = normalizePassword(payload.password)
+
+    const { hasCredentials, isAuthorizedSuperAdminEmail, isAuthorizedSuperAdminPassword } = getSuperAdminConfig()
+
+    if (!hasCredentials) {
+      return res.status(500).json({ message: "SuperAdmin credentials not configured" })
+    }
+
+    if (!email || !password) {
+      return res.status(400).json({ message: "Missing email or password" })
+    }
+
+    if (!isAuthorizedSuperAdminEmail(email) || !isAuthorizedSuperAdminPassword(password)) {
+      return res.status(401).json({ message: "Invalid superadmin credentials" })
+    }
+
+    const existing = await ensureSuperAdminUser()
+    signInWithUserCookie(res, existing._id)
+
+    return res.status(200).json({
+      success: true,
+      message: "SuperAdmin signin successful",
+      user: {
+        id: existing._id,
+        fullname: existing.fullname,
+        email: existing.email,
+        role: existing.role,
+        gender: existing.gender || "Other",
+      },
+    })
+  } catch (err) {
+    return res.status(500).json({ message: "SuperAdmin signin failed" })
+  }
+}
+
 exports.verifysuperadminotp = async (req, res) => {
   try {
     const payload = sanitize(req.body || {})
     const email = normalizeEmail(payload.email)
     const otp = normalizeOtp(payload.otp)
 
-    const {
-      superEmail,
-      superPass,
-      superName,
-      hasCredentials,
-      isAuthorizedSuperAdminEmail
-    } = getSuperAdminConfig()
+    const { hasCredentials, isAuthorizedSuperAdminEmail } = getSuperAdminConfig()
 
     if (!hasCredentials) {
       return res.status(500).json({ message: "SuperAdmin credentials not configured" })
@@ -414,25 +438,8 @@ exports.verifysuperadminotp = async (req, res) => {
       return res.status(400).json({ message: "Invalid OTP" })
     }
 
-    let existing = await user.findOne({ email: superEmail })
-    const hashed = await bcrypt.hash(String(superPass), 12)
-
-    if (!existing) {
-      existing = await user.create({
-        fullname: superName,
-        email: superEmail,
-        password: hashed,
-        role: "SuperAdmin",
-        gender: "Other",
-      })
-    } else {
-      existing.password = hashed
-      existing.role = "SuperAdmin"
-      existing.fullname = existing.fullname || superName
-      await existing.save()
-    }
-
-    await SuperAdminOtp.deleteMany({ email: superEmail })
+    const existing = await ensureSuperAdminUser()
+    await SuperAdminOtp.deleteMany({ email: existing.email })
 
     const token = gentoken(existing._id)
     res.cookie("token", token, buildCookieOptions())
@@ -456,114 +463,7 @@ exports.verifysuperadminotp = async (req, res) => {
 
 
 exports.verifysigninotp = async(req,res)=>{
-try{
-
-const payload=sanitize(req.body||{})
-const email=normalizeEmail(payload.email)
-const otp=normalizeOtp(payload.otp)
-
-const {
-  superEmail,
-  superPass,
-  superName,
-  hasCredentials,
-  isAuthorizedSuperAdminEmail
-} = getSuperAdminConfig()
-
-if(!email||!otp){
-return res.status(400).json({message:"Missing email or OTP"})
-}
-
-// SuperAdmin verification path
-if (hasCredentials && isAuthorizedSuperAdminEmail(email)) {
-  const record = await SuperAdminOtp.findOne({ email }).sort({ updatedAt: -1 })
-  if (!record) {
-    return res.status(400).json({ message: "Invalid request" })
-  }
-  if (!record.expire || record.expire.getTime() < Date.now()) {
-    return res.status(400).json({ message: "OTP expired" })
-  }
-  const otpHash = hashotp(otp)
-  if (otpHash !== record.otp) {
-    return res.status(400).json({ message: "Invalid OTP" })
-  }
-
-  let existing = await user.findOne({ email: superEmail })
-  const hashed = await bcrypt.hash(String(superPass), 12)
-
-  if (!existing) {
-    existing = await user.create({
-      fullname: superName,
-      email: superEmail,
-      password: hashed,
-      role: "SuperAdmin",
-      gender: "Other",
-    })
-  } else {
-    existing.password = hashed
-    existing.role = "SuperAdmin"
-    existing.fullname = existing.fullname || superName
-    await existing.save()
-  }
-
-  await SuperAdminOtp.deleteMany({ email: superEmail })
-  const token = gentoken(existing._id)
-  res.cookie("token", token, buildCookieOptions())
-  return res.status(200).json({
-    success: true,
-    message: "Signin successful",
-    user: {
-      id: existing._id,
-      fullname: existing.fullname,
-      email: existing.email,
-      role: existing.role,
-      gender: existing.gender || "Other",
-    },
-  })
-}
-
-const existing=await user.findOne({email})
-
-if(!existing||!existing.signinotp){
-return res.status(400).json({message:"Invalid request"})
-}
-
-if(!existing.signinotpexpires||existing.signinotpexpires.getTime()<Date.now()){
-return res.status(400).json({message:"OTP expired"})
-}
-
-const otpHash=hashotp(otp)
-
-if(otpHash!==existing.signinotp){
-return res.status(400).json({message:"Invalid OTP"})
-}
-
-existing.signinotp=undefined
-existing.signinotpexpires=undefined
-
-await existing.save()
-
-const token=gentoken(existing._id)
-
-res.cookie("token",token,buildCookieOptions())
-
-return res.status(200).json({
-success:true,
-message:"Signin successful",
-user:{
-id:existing._id,
-fullname:existing.fullname,
-email:existing.email,
-mobile:existing.mobile||"",
-role:existing.role,
-gender:existing.gender
-}
-})
-
-}catch(err){
-if (res.headersSent) return
-return res.status(500).json({message:"Verification failed"})
-}
+return res.status(410).json({message:"OTP signin is disabled. Please use email and password signin."})
 }
 
 
@@ -573,6 +473,7 @@ try{
 const payload=sanitize(req.body||{})
 const idToken=String(payload.idToken||payload.firebaseIdToken||"").trim()
 const mobile=normalizeMobile(payload.mobile)
+const hasProvidedMobile=Boolean(mobile)
 const preferredName=String(payload.fullname||"").trim()
 const preferredGender=String(payload.gender||"").trim()
 
@@ -580,11 +481,11 @@ if(!idToken){
 return res.status(400).json({message:"Missing Firebase ID token"})
 }
 
-if(!mobile){
+if(mode==="signup"&&!mobile){
 return res.status(400).json({message:"Mobile number is required for Google authentication"})
 }
 
-if(!isValidMobile(mobile)){
+if(hasProvidedMobile&&!isValidMobile(mobile)){
 return res.status(400).json({message:"Invalid mobile number format"})
 }
 
@@ -600,9 +501,11 @@ const googleName=String(decoded?.name||"").trim()
 const photoURL=String(decoded?.picture||"").trim()
 const emailVerified=Boolean(decoded?.email_verified)
 
+if(hasProvidedMobile){
 const mobileOwner=await user.findOne({mobile}).select("_id email").lean()
 if(mobileOwner&&normalizeEmail(mobileOwner.email)!==email){
 return res.status(409).json({message:"This mobile number is already used by another account"})
+}
 }
 
 let existingUser=await user.findOne({email})
@@ -621,7 +524,7 @@ existingUser=await user.create({
 fullname:preferredName||googleName||"KhanCosmetics User",
 email,
 password:randomPassword,
-mobile,
+mobile:mobile||undefined,
 gender,
 role:"User",
 studentid,
@@ -637,9 +540,15 @@ if(existingUser.firebaseuid&&existingUser.firebaseuid!==firebaseUid){
 return res.status(401).json({message:"Google account mismatch for this email"})
 }
 
+if(hasProvidedMobile){
 existingUser.mobile=mobile
+}
 existingUser.firebaseuid=firebaseUid||existingUser.firebaseuid
-existingUser.authprovider=existingUser.authprovider==="password" ? "google+password" : "google"
+if(existingUser.authprovider==="password"){
+existingUser.authprovider="google+password"
+}else if(existingUser.authprovider!=="google+password"){
+existingUser.authprovider="google"
+}
 existingUser.isemailverified=Boolean(existingUser.isemailverified||emailVerified)
 existingUser.lastlogin=new Date()
 

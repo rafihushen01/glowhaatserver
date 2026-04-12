@@ -5,6 +5,7 @@ const path = require("path");
 const uploadoncloudinary = require("../utils/Cloudinary");
 const User = require("../models/User");
 const Item = require("../models/Item");
+const Order = require("../models/Order");
 const Nav = require("../models/Nav");
 const SellerShop = require("../models/SellerShop");
 const SellerOrder = require("../models/SellerOrder");
@@ -71,7 +72,11 @@ const ensureRole = async (req, res, role) => {
 
 const getOrCreateConfig = async () => {
   let config = await SellerCommissionConfig.findOne({}).sort({ createdAt: 1 });
-  if (!config) config = await SellerCommissionConfig.create({ globalpercentage: 5, selleroverrides: [] });
+  if (!config) config = await SellerCommissionConfig.create({ globalpercentage: 5, khancommissionpercentage: 10, selleroverrides: [] });
+  if (config && typeof config.khancommissionpercentage !== "number") {
+    config.khancommissionpercentage = 10;
+    await config.save();
+  }
   return config;
 };
 
@@ -82,6 +87,78 @@ const getSellerPercent = async (sellerid) => {
     percent: Number(override?.percentage ?? config.globalpercentage ?? 5),
     global: Number(config.globalpercentage ?? 5),
     source: override ? "override" : "global",
+  };
+};
+
+const getKhanCommissionPercent = async () => {
+  const config = await getOrCreateConfig();
+  return Number(config?.khancommissionpercentage ?? 10);
+};
+
+const computeKhanDistributorCommissionSummary = async () => {
+  const deliveredOrders = await Order.find({ status: "delivered" }).select("items deliverytotal").lean();
+  if (!deliveredOrders.length) {
+    return {
+      totalscannedorders: 0,
+      eligibleorders: 0,
+      eligibleitemcount: 0,
+      distributoritemgross: 0,
+      allocateddeliverycharge: 0,
+      commissionbase: 0,
+    };
+  }
+
+  const productIds = new Set();
+  deliveredOrders.forEach((order) => {
+    (order.items || []).forEach((entry) => {
+      if (entry?.productid) productIds.add(String(entry.productid));
+    });
+  });
+
+  const products = await Item.find({ _id: { $in: Array.from(productIds) } })
+    .select("_id isselleritem iskhanproduct")
+    .lean();
+  const productMap = new Map(products.map((p) => [String(p._id), p]));
+
+  let eligibleorders = 0;
+  let eligibleitemcount = 0;
+  let distributoritemgross = 0;
+  let allocateddeliverycharge = 0;
+  let commissionbase = 0;
+
+  deliveredOrders.forEach((order) => {
+    const items = Array.isArray(order.items) ? order.items : [];
+    const subtotal = items.reduce((sum, entry) => sum + Math.max(0, Number(entry?.totalprice || 0)), 0);
+
+    let eligibleSubtotal = 0;
+    items.forEach((entry) => {
+      const product = productMap.get(String(entry?.productid || ""));
+      if (!product) return;
+      if (product.isselleritem) return;
+      if (product.iskhanproduct !== false) return;
+
+      eligibleitemcount += 1;
+      eligibleSubtotal += Math.max(0, Number(entry?.totalprice || 0));
+    });
+
+    if (eligibleSubtotal <= 0) return;
+    eligibleorders += 1;
+    distributoritemgross += eligibleSubtotal;
+
+    const delivery = Math.max(0, Number(order.deliverytotal || 0));
+    const share = subtotal > 0 ? (delivery * eligibleSubtotal) / subtotal : 0;
+    const safeShare = Math.max(0, Number(share.toFixed(2)));
+    allocateddeliverycharge += safeShare;
+    commissionbase += Math.max(0, Number((eligibleSubtotal - safeShare).toFixed(2)));
+  });
+
+  return {
+    totalscannedorders: deliveredOrders.length,
+    eligibleorders,
+    eligibleitemcount,
+    distributoritemgross: Number(distributoritemgross.toFixed(2)),
+    allocateddeliverycharge: Number(allocateddeliverycharge.toFixed(2)),
+    commissionbase: Number(commissionbase.toFixed(2)),
   };
 };
 
@@ -351,6 +428,7 @@ exports.createSellerItem = async (req, res) => {
       sellerid: seller._id,
       shopid: shop._id,
       isselleritem: true,
+      iskhanproduct: false,
       deliveryschema: {
         name: normalizeText(body.deliveryname) || "Standard Delivery",
         deliverytime: normalizeText(body.deliverytime) || "3-5 Days",
@@ -693,6 +771,41 @@ exports.setGlobalCommissionPercent = async (req, res) => {
     return res.status(200).json({ success: true, message: "Global commission updated.", config });
   } catch (_error) {
     return res.status(500).json({ success: false, message: "Failed to update global commission." });
+  }
+};
+
+exports.setKhanCommissionPercent = async (req, res) => {
+  try {
+    const admin = await ensureRole(req, res, "SuperAdmin");
+    if (!admin) return;
+    const config = await getOrCreateConfig();
+    config.khancommissionpercentage = Math.max(0, Math.min(100, toNumber(req.body?.percentage, 10)));
+    await config.save();
+    return res.status(200).json({ success: true, message: "Khan commission updated.", config });
+  } catch (_error) {
+    return res.status(500).json({ success: false, message: "Failed to update Khan commission." });
+  }
+};
+
+exports.getAdminKhanCommissionSummary = async (req, res) => {
+  try {
+    const admin = await ensureRole(req, res, "SuperAdmin");
+    if (!admin) return;
+
+    const percent = await getKhanCommissionPercent();
+    const summary = await computeKhanDistributorCommissionSummary();
+    const commissionamount = Number(((summary.commissionbase * percent) / 100).toFixed(2));
+
+    return res.status(200).json({
+      success: true,
+      summary: {
+        ...summary,
+        percentage: percent,
+        commissionamount,
+      },
+    });
+  } catch (_error) {
+    return res.status(500).json({ success: false, message: "Failed to fetch Khan commission summary." });
   }
 };
 

@@ -566,6 +566,7 @@ exports.createItem = async (req, res) => {
       isreturnable: false,
       isperishable: false,
       warrantynotavalible: false,
+      iskhanproduct: true,
       isactive: true,
     });
 
@@ -648,6 +649,10 @@ exports.edititem = async (req, res) => {
 
     if (typeof body.variants === "string") {
       body.variants = safeJsonParse(body.variants, []);
+    }
+
+    if (hasOwn(body, "iskhanproduct")) {
+      body.iskhanproduct = parseBoolean(body.iskhanproduct, true);
     }
 
     if (hasOwn(body, "categoryids")) {

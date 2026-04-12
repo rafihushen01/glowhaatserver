@@ -1,15 +1,12 @@
 const sanitize = require("mongo-sanitize");
-const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const path = require("path");
 const validator = require("validator");
 const bcrypt = require("bcryptjs");
 const SellerRequest = require("../models/SellerRequest");
-const SellerSignupOtp = require("../models/SellerSignupOtp");
 const User = require("../models/User");
 const uploadoncloudinary = require("../utils/Cloudinary");
 const {
-  sendSellerSignupOtp,
   sendSellerRequestSubmittedMail,
   sendSellerStatusUpdateMail,
   sendSellerRequestAlertToSuperAdmin,
@@ -21,11 +18,6 @@ const normalizeMobile = (value = "") => String(value).trim();
 const isValidMobile = (value = "") => /^\+?\d{8,15}$/.test(String(value).trim());
 const MAX_TOTAL_REQUESTS = 5;
 const MAX_CONSECUTIVE_REJECTIONS = 4;
-
-const getSellerOtpHash = (otp = "") =>
-  crypto.createHash("sha256").update(String(otp).trim()).digest("hex");
-
-const generateOtp = () => crypto.randomInt(100000, 999999).toString();
 
 const getJwtSecret = () => process.env.SECRETKEY || "seller-secret";
 
@@ -125,7 +117,7 @@ const ensureSuperAdmin = async (req, res) => {
   return me;
 };
 
-exports.requestSellerOtp = async (req, res) => {
+exports.startSellerOnboarding = async (req, res) => {
   try {
     const payload = sanitize(req.body || {});
     const fullname = normalizeText(payload.fullname);
@@ -133,6 +125,7 @@ exports.requestSellerOtp = async (req, res) => {
     const mobile = normalizeMobile(payload.mobile);
     const whatsapp = normalizeMobile(payload.whatsapp || "");
     const sellerpassword = normalizeText(payload.sellerpassword || "");
+    const confirmpassword = normalizeText(payload.confirmpassword || "");
 
     if (!fullname || !email || !mobile || !sellerpassword) {
       return res
@@ -156,6 +149,10 @@ exports.requestSellerOtp = async (req, res) => {
       return res.status(400).json({ message: "Seller password must be at least 6 characters." });
     }
 
+    if (confirmpassword && sellerpassword !== confirmpassword) {
+      return res.status(400).json({ message: "Seller password and confirm password do not match." });
+    }
+
     const attempts = await getRequestAttemptMeta(email);
     if (attempts.hasPending) {
       return res.status(409).json({
@@ -169,58 +166,7 @@ exports.requestSellerOtp = async (req, res) => {
       });
     }
 
-    const otp = generateOtp();
-    const otpHash = getSellerOtpHash(otp);
-
-    await SellerSignupOtp.findOneAndUpdate(
-      { email },
-      { email, otp: otpHash, expire: new Date(Date.now() + 5 * 60 * 1000) },
-      { upsert: true, new: true }
-    );
-
-    await sendSellerSignupOtp(email, otp);
-
-    return res.status(200).json({
-      success: true,
-      message: "OTP sent to your email.",
-    });
-  } catch (_error) {
-    return res.status(500).json({ message: "Failed to send OTP." });
-  }
-};
-
-exports.verifySellerOtp = async (req, res) => {
-  try {
-    const payload = sanitize(req.body || {});
-    const fullname = normalizeText(payload.fullname);
-    const email = normalizeEmail(payload.email);
-    const mobile = normalizeMobile(payload.mobile);
-    const whatsapp = normalizeMobile(payload.whatsapp || "");
-    const sellerpassword = normalizeText(payload.sellerpassword || "");
-    const otp = normalizeText(payload.otp);
-
-    if (!fullname || !email || !mobile || !otp || !sellerpassword) {
-      return res.status(400).json({ message: "Missing required fields." });
-    }
-
-    if (sellerpassword.length < 6) {
-      return res.status(400).json({ message: "Seller password must be at least 6 characters." });
-    }
-
-    const record = await SellerSignupOtp.findOne({ email }).sort({ updatedAt: -1 });
-    if (!record) return res.status(400).json({ message: "Invalid OTP request." });
-    if (!record.expire || record.expire.getTime() < Date.now()) {
-      return res.status(400).json({ message: "OTP expired." });
-    }
-
-    const otpHash = getSellerOtpHash(otp);
-    if (otpHash !== record.otp) {
-      return res.status(400).json({ message: "Invalid OTP." });
-    }
-
-    await SellerSignupOtp.deleteMany({ email });
     const sellerpasswordhash = await bcrypt.hash(sellerpassword, 12);
-
     const stepToken = signSellerStepToken({
       fullname,
       email,
@@ -234,11 +180,19 @@ exports.verifySellerOtp = async (req, res) => {
     return res.status(200).json({
       success: true,
       token: stepToken,
-      message: "OTP verified.",
+      message: "Step 1 completed.",
     });
   } catch (_error) {
-    return res.status(500).json({ message: "OTP verification failed." });
+    return res.status(500).json({ message: "Failed to complete step 1." });
   }
+};
+
+exports.requestSellerOtp = async (req, res) => {
+  return exports.startSellerOnboarding(req, res);
+};
+
+exports.verifySellerOtp = async (req, res) => {
+  return res.status(410).json({ message: "OTP verification is disabled. Use /seller/start instead." });
 };
 
 exports.submitSellerRequest = async (req, res) => {
