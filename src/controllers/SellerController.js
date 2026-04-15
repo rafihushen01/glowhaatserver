@@ -6,11 +6,6 @@ const bcrypt = require("bcryptjs");
 const SellerRequest = require("../models/SellerRequest");
 const User = require("../models/User");
 const uploadoncloudinary = require("../utils/Cloudinary");
-const {
-  sendSellerRequestSubmittedMail,
-  sendSellerStatusUpdateMail,
-  sendSellerRequestAlertToSuperAdmin,
-} = require("../utils/Mail");
 
 const normalizeEmail = (value = "") => String(value).trim().toLowerCase();
 const normalizeText = (value = "") => String(value).trim();
@@ -28,11 +23,6 @@ const signSellerStepToken = (payload = {}) => {
 const verifySellerStepToken = (token = "") => {
   return jwt.verify(token, getJwtSecret());
 };
-
-const getSuperAdminEmails = () =>
-  [process.env.SUPERADMIN_EMAIL, process.env.SUPERADMIN_GMAIL]
-    .map(normalizeEmail)
-    .filter(Boolean);
 
 const uploadSingleFile = async (fileArray = []) => {
   const file = Array.isArray(fileArray) ? fileArray[0] : null;
@@ -326,32 +316,6 @@ exports.submitSellerRequest = async (req, res) => {
       await linkedUser.save();
     }
 
-    const superAdminEmails = getSuperAdminEmails();
-    await Promise.allSettled([
-      sendSellerRequestSubmittedMail(email, { fullname, businessname }),
-      businessgmail && businessgmail !== email
-        ? sendSellerRequestSubmittedMail(businessgmail, { fullname, businessname })
-        : Promise.resolve(),
-      ...superAdminEmails.map((to) =>
-        sendSellerRequestAlertToSuperAdmin(to, {
-          fullname,
-          email,
-          mobile,
-          whatsapp,
-          businessname,
-          businessgmail,
-          businessphone,
-          storetype,
-          businessmodel,
-          preferredcategories: preferredcategories.join(", "),
-          pickupdistrict: pickup.district,
-          pickupcity: pickup.city,
-          pickuparea: pickup.area,
-          deliverymanphone: pickup.deliverymanphone,
-        })
-      ),
-    ]);
-
     return res.status(201).json({
       success: true,
       message: "Seller request submitted successfully.",
@@ -525,14 +489,6 @@ exports.decideSellerRequest = async (req, res) => {
     }
 
     await existing.save();
-
-    await Promise.allSettled(
-      [existing.email, existing.businessgmail]
-        .map((entry) => normalizeEmail(entry))
-        .filter(Boolean)
-        .filter((value, index, arr) => arr.indexOf(value) === index)
-        .map((mailTo) => sendSellerStatusUpdateMail(mailTo, { status: decision, rejectreason }))
-    );
 
     return res.status(200).json({
       success: true,

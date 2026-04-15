@@ -4,7 +4,6 @@ const bcrypt = require("bcryptjs")
 const validator = require("validator")
 const gentoken = require("../utils/Token")
 const crypto = require("crypto")
-const { sendSigninOtp } = require("../utils/Mail")
 const SuperAdminOtp = require("../models/SuperAdminOtp")
 const { verifyFirebaseIdToken } = require("../utils/FirebaseAdmin")
 
@@ -93,13 +92,6 @@ const buildCookieOptions = () => {
     maxAge:3*24*60*60*1000,
     path:"/"
   }
-}
-
-const isProductionEnv = () => process.env.NODE_ENV === "production"
-
-const isSuperAdminOtpFallbackAllowed = () => {
-  if (!isProductionEnv()) return true
-  return String(process.env.SUPERADMIN_OTP_FALLBACK || "").trim().toLowerCase() === "true"
 }
 
 const signInWithUserCookie = (res, userId) => {
@@ -288,81 +280,7 @@ return res.status(500).json({message:"Signin failed"})
 }
 
 exports.requestsuperadminotp = async (req, res) => {
-  try {
-    const payload = sanitize(req.body || {})
-    const email = normalizeEmail(payload.email)
-    const password = normalizePassword(payload.password)
-
-    const { hasCredentials, isAuthorizedSuperAdminEmail, isAuthorizedSuperAdminPassword } = getSuperAdminConfig()
-
-    if (!hasCredentials) {
-      return res.status(500).json({
-        message: "SuperAdmin credentials not configured",
-        reason: "SUPERADMIN_NOT_CONFIGURED",
-        detail: "Set SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD in production env."
-      })
-    }
-
-    if (!email || !password) {
-      return res.status(400).json({ message: "Missing email or password" })
-    }
-
-    if (!isAuthorizedSuperAdminEmail(email) || !isAuthorizedSuperAdminPassword(password)) {
-      return res.status(401).json({ message: "Invalid superadmin credentials" })
-    }
-
-    const otp = generateotp()
-    const otpHash = hashotp(otp)
-
-    await SuperAdminOtp.findOneAndUpdate(
-      { email },
-      { email, otp: otpHash, expire: new Date(Date.now() + 5 * 60 * 1000) },
-      { upsert: true, new: true }
-    )
-
-    let deliveredVia = "email"
-    let fallbackReason = ""
-    let devOtp = ""
-
-    try {
-      await sendSigninOtp(email, otp)
-    } catch (mailError) {
-      deliveredVia = "fallback"
-      fallbackReason = String(mailError?.code || "SMTP_SEND_FAILED")
-
-      if (!isSuperAdminOtpFallbackAllowed()) {
-        throw mailError
-      }
-
-      if (!isProductionEnv()) {
-        devOtp = otp
-      }
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: deliveredVia === "email" ? "OTP sent" : "OTP generated",
-      delivery: deliveredVia,
-      reason: fallbackReason || undefined,
-      devOtp: devOtp || undefined
-    })
-  } catch (err) {
-    const reason = String(err?.code || "UNKNOWN")
-    console.error("SuperAdmin OTP send error:", reason, err?.message || err)
-
-    let detail = "Email service temporary issue. Please retry in a few seconds."
-    if (reason === "SMTP_NOT_CONFIGURED") {
-      detail = "SMTP credentials are missing on server env."
-    } else if (reason === "SMTP_AUTH_FAILED") {
-      detail = "SMTP auth failed. Regenerate Gmail App Password in production env."
-    }
-
-    return res.status(500).json({
-      message: "SuperAdmin OTP failed",
-      reason,
-      detail
-    })
-  }
+  return res.status(410).json({ message: "SuperAdmin OTP is disabled. Please use superadmin signin." })
 }
 
 exports.superadminsignin = async (req, res) => {

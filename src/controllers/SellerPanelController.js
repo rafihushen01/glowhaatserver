@@ -14,7 +14,6 @@ const SellerCommissionConfig = require("../models/SellerCommissionConfig");
 const SellerCommissionPayment = require("../models/SellerCommissionPayment");
 const SellerNotification = require("../models/SellerNotification");
 const SellerSubscription = require("../models/SellerSubscription");
-const { sendSellerSponsorshipStatusMail, sendSellerCommissionReminderMail, sendSellerCommissionStatusMail } = require("../utils/Mail");
 
 const KHAN_BKASH_NUMBER = "01862623066";
 const ORDER_STATUSES = ["placed", "processing", "shipped", "delivered", "returned", "canceled"];
@@ -249,10 +248,7 @@ const ensureCommissionRecord = async (seller, shop) => {
 
   const now = new Date();
   if (["Pending", "Overdue", "Rejected"].includes(payment.status) && now > payment.periodend && payment.reminderssent === 0) {
-    await Promise.allSettled([
-      sendSellerCommissionReminderMail(seller.email, { amount: payment.commissionamount, dueat: payment.dueat, bikash: KHAN_BKASH_NUMBER }),
-      SellerNotification.create({ sellerid: seller._id, shopid: shop._id, type: "Warning", title: "Commission due", message: `Your commission due is ?${payment.commissionamount.toFixed(2)}. Pay within 4 days.` }),
-    ]);
+    await SellerNotification.create({ sellerid: seller._id, shopid: shop._id, type: "Warning", title: "Commission due", message: `Your commission due is ?${payment.commissionamount.toFixed(2)}. Pay within 4 days.` });
     payment.reminderssent = 1;
     await payment.save();
   }
@@ -718,7 +714,6 @@ exports.decideSponsorshipRequest = async (req, res) => {
     const request = await SellerSponsorship.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false, message: "Request not found." });
     const item = await Item.findById(request.itemid);
-    const seller = await User.findById(request.sellerid).select("email").lean();
 
     request.status = decision;
     request.rejectreason = decision === "Rejected" ? rejectreason : "";
@@ -742,7 +737,6 @@ exports.decideSponsorshipRequest = async (req, res) => {
 
     await request.save();
     await SellerNotification.create({ sellerid: request.sellerid, shopid: request.shopid, type: decision === "Verified" ? "Success" : "Warning", title: `Sponsorship ${decision.toLowerCase()}`, message: decision === "Verified" ? `Sponsorship active for ${request.sponsoreddays} days.` : `Sponsorship rejected. ${rejectreason || "Invalid payment proof."}` });
-    if (seller?.email) await sendSellerSponsorshipStatusMail(seller.email, { status: decision, days: request.sponsoreddays, rejectreason });
 
     return res.status(200).json({ success: true, message: `Sponsorship ${decision.toLowerCase()}.` });
   } catch (_error) {
@@ -864,7 +858,6 @@ exports.decideCommissionPayment = async (req, res) => {
     if (!["Verified", "Rejected"].includes(decision)) return res.status(400).json({ success: false, message: "Invalid decision." });
 
     const shop = await SellerShop.findById(payment.shopid);
-    const seller = await User.findById(payment.sellerid).select("email").lean();
 
     payment.status = decision;
     payment.rejectreason = decision === "Rejected" ? rejectreason : "";
@@ -886,7 +879,6 @@ exports.decideCommissionPayment = async (req, res) => {
     }
 
     await SellerNotification.create({ sellerid: payment.sellerid, shopid: payment.shopid, type: decision === "Verified" ? "Success" : "Danger", title: `Commission payment ${decision.toLowerCase()}`, message: decision === "Verified" ? "Payment verified. Dashboard unlocked." : `Payment rejected. ${rejectreason || "Invalid payment proof."}` });
-    if (seller?.email) await sendSellerCommissionStatusMail(seller.email, { status: decision, rejectreason });
 
     return res.status(200).json({ success: true, message: `Payment ${decision.toLowerCase()}.` });
   } catch (_error) {
