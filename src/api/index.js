@@ -9,6 +9,7 @@ const path = require("path")
 const { Server } = require("socket.io")
 const mongoose = require("mongoose")
 const compression = require("compression")
+const { setSocketServer } = require("../utils/SocketServer")
 
 dotenv.config({ path: path.resolve(__dirname, "../../.env") })
 
@@ -49,6 +50,7 @@ const io = new Server(server, {
   pingInterval: Number(process.env.SOCKET_PING_INTERVAL) || 25000,
   transports: ["websocket", "polling"]
 })
+setSocketServer(io)
 
 io.on("connection", (socket) => {
   console.log("🟢 Socket connected:", socket.id)

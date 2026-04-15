@@ -792,7 +792,9 @@ exports.getnewinitems = async (req, res) => {
 exports.getitem = async (req, res) => {
   try {
     const { slug } = req.params;
-    const item = await Item.findOne({ slug });
+    const item = await Item.findOne({ slug })
+      .populate("shopid", "_id shopname slug profileimage bannerimage description")
+      .populate("sellerid", "_id fullname usersavatar role");
 
     if (!item) {
       return res.json({ success: false, message: "Item not found" });

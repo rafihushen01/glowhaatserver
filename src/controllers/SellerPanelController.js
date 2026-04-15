@@ -214,6 +214,17 @@ const parseJsonArray = (value) => {
   }
 };
 
+const normalizeUploadMap = (files) => {
+  if (!files) return {};
+  if (!Array.isArray(files)) return files;
+  return files.reduce((acc, file) => {
+    if (!file?.fieldname) return acc;
+    if (!acc[file.fieldname]) acc[file.fieldname] = [];
+    acc[file.fieldname].push(file);
+    return acc;
+  }, {});
+};
+
 const ensureCommissionRecord = async (seller, shop) => {
   const cycle = cycleFrom(shop.createdAt);
   const { percent } = await getSellerPercent(seller._id);
@@ -364,6 +375,7 @@ exports.createSellerItem = async (req, res) => {
     if (shop.healthisfrozen) return res.status(423).json({ success: false, message: "Shop is frozen." });
 
     const body = sanitize(req.body || {});
+    const fileMap = normalizeUploadMap(req.files);
     const categoryids = parseJsonArray(body.categoryids);
     const categorytree = parseJsonArray(body.categorytree);
     const variants = parseJsonArray(body.variants);
@@ -372,11 +384,11 @@ exports.createSellerItem = async (req, res) => {
     if (!name) return res.status(400).json({ success: false, message: "Item name is required." });
     if (!categoryids.length) return res.status(400).json({ success: false, message: "Category is required." });
 
-    const whiteimage = await uploadSingle(req.files?.whiteimage);
-    const hoverimage = await uploadSingle(req.files?.hoverimage);
+    const whiteimage = await uploadSingle(fileMap?.whiteimage);
+    const hoverimage = await uploadSingle(fileMap?.hoverimage);
 
     const gallery = [];
-    const galleryFiles = Array.isArray(req.files?.gallery) ? req.files.gallery : [];
+    const galleryFiles = Array.isArray(fileMap?.gallery) ? fileMap.gallery : [];
     for (const f of galleryFiles) {
       const url = await uploadSingle([f]);
       if (url) gallery.push(url);
@@ -388,7 +400,7 @@ exports.createSellerItem = async (req, res) => {
       const uploaded = [];
       for (let s = 0; s < count; s += 1) {
         const key = `variantmedia_${v}_${s}`;
-        const f = Array.isArray(req.files?.[key]) ? req.files[key][0] : null;
+        const f = Array.isArray(fileMap?.[key]) ? fileMap[key][0] : null;
         if (!f) continue;
         const url = await uploadSingle([f]);
         if (url) uploaded.push(url);
@@ -450,10 +462,29 @@ exports.updateSellerItem = async (req, res) => {
     const item = await Item.findOne({ _id: id, sellerid: seller._id });
     if (!item) return res.status(404).json({ success: false, message: "Item not found." });
 
+    const fileMap = normalizeUploadMap(req.files);
+
     Object.keys(req.body || {}).forEach((key) => {
-      if (["name", "description", "highlight", "aboutitems", "brand", "warranty", "warrantyperiod", "categorypath"].includes(key)) item[key] = req.body[key];
+      if (["name", "description", "highlight", "aboutitems", "brand", "warranty", "warrantyperiod", "categorypath", "type"].includes(key)) item[key] = req.body[key];
       if (["flashsale", "eidsale", "coustomsale", "isreturnable", "warrantynotavalible", "isperishable", "isactive"].includes(key)) item[key] = String(req.body[key]) === "true" || req.body[key] === true;
     });
+
+    if (req.body?.categoryids) {
+      const categoryids = parseJsonArray(req.body.categoryids);
+      if (Array.isArray(categoryids) && categoryids.length) {
+        item.categoryids = categoryids;
+        item.category = await buildCategoryTree(categoryids);
+      }
+    }
+    if (req.body?.categorytree) {
+      const categorytree = parseJsonArray(req.body.categorytree);
+      if (Array.isArray(categorytree) && categorytree.length) item.categorytree = categorytree;
+    }
+    if (req.body?.categorypath) {
+      item.categorypath = normalizeText(req.body.categorypath);
+    } else if (Array.isArray(item.categorytree) && item.categorytree.length) {
+      item.categorypath = item.categorytree.join(" > ");
+    }
 
     if (req.body?.deliveryschema) {
       try {
@@ -461,18 +492,60 @@ exports.updateSellerItem = async (req, res) => {
         item.deliveryschema = { ...item.deliveryschema, ...ds, deliverycharge: Math.max(0, toNumber(ds?.deliverycharge, item.deliveryschema?.deliverycharge || 0)) };
       } catch {}
     }
+    if (req.body?.deliveryname || req.body?.deliverytime || req.body?.deliverycharge || typeof req.body?.isfreeshipping !== "undefined") {
+      item.deliveryschema = {
+        ...(item.deliveryschema || {}),
+        name: normalizeText(req.body.deliveryname || item.deliveryschema?.name || "Standard Delivery"),
+        deliverytime: normalizeText(req.body.deliverytime || item.deliveryschema?.deliverytime || "3-5 Days"),
+        deliverycharge: Math.max(0, toNumber(req.body.deliverycharge, item.deliveryschema?.deliverycharge || 0)),
+        isfreeshipping: String(req.body.isfreeshipping || item.deliveryschema?.isfreeshipping || "false") === "true" || req.body.isfreeshipping === true,
+      };
+    }
 
     if (req.body?.variants) {
       try {
         const variants = typeof req.body.variants === "string" ? JSON.parse(req.body.variants) : req.body.variants;
-        if (Array.isArray(variants)) item.variants = variants;
+        if (Array.isArray(variants)) {
+          for (let v = 0; v < variants.length; v += 1) {
+            const variant = variants[v];
+            const count = Array.isArray(variant.images) ? variant.images.length : 0;
+            const uploaded = [];
+            for (let s = 0; s < count; s += 1) {
+              const key = `variantmedia_${v}_${s}`;
+              const f = Array.isArray(fileMap?.[key]) ? fileMap[key][0] : null;
+              const existing = item.variants?.[v]?.images?.[s] || "";
+              if (!f && variant.images[s]) {
+                uploaded.push(String(variant.images[s]));
+                continue;
+              }
+              if (!f && existing) {
+                uploaded.push(String(existing));
+                continue;
+              }
+              if (!f) continue;
+              const url = await uploadSingle([f]);
+              if (url) uploaded.push(url);
+            }
+            variant.images = uploaded;
+          }
+          item.variants = variants;
+        }
       } catch {}
     }
 
-    const profile = await uploadSingle(req.files?.whiteimage);
-    const hover = await uploadSingle(req.files?.hoverimage);
+    const profile = await uploadSingle(fileMap?.whiteimage);
+    const hover = await uploadSingle(fileMap?.hoverimage);
     if (profile) item.whiteimage = profile;
     if (hover) item.hoverimage = hover;
+
+    if (Array.isArray(fileMap?.gallery) && fileMap.gallery.length) {
+      const gallery = [];
+      for (const f of fileMap.gallery) {
+        const url = await uploadSingle([f]);
+        if (url) gallery.push(url);
+      }
+      if (gallery.length) item.gallery = gallery;
+    }
 
     await item.save();
     return res.status(200).json({ success: true, message: "Item updated.", item });

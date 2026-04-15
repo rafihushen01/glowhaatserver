@@ -45,6 +45,19 @@ const {
   getAdminSubscriptions,
   decideSubscription,
 } = require("../controllers/SellerPanelController");
+const { getPublicShopProfile } = require("../controllers/SellerPublicController");
+const {
+  startSellerChat,
+  getMyChatThreads,
+  getChatThread,
+  sendChatMessage,
+  deleteChatMessage,
+  markChatThreadRead,
+  toggleThreadBlock,
+  createSellerReport,
+  getAdminChatReports,
+  decideChatReport,
+} = require("../controllers/SellerChatController");
 
 const router = express.Router();
 
@@ -129,5 +142,18 @@ router.patch("/admin/panel/shops/:shopid/freeze", isauth, toggleShopFreeze);
 router.get("/admin/panel/shops", isauth, getAdminShops);
 router.get("/admin/panel/subscriptions", isauth, getAdminSubscriptions);
 router.patch("/admin/panel/subscriptions/:id/decision", isauth, decideSubscription);
+
+router.get("/public/shop/:slug", getPublicShopProfile);
+
+router.post("/chat/start", optionalauth, startSellerChat);
+router.get("/chat/threads", optionalauth, getMyChatThreads);
+router.get("/chat/threads/:threadid", optionalauth, getChatThread);
+router.post("/chat/threads/:threadid/messages", optionalauth, upload.any(), sendChatMessage);
+router.delete("/chat/threads/:threadid/messages/:messageid", optionalauth, deleteChatMessage);
+router.patch("/chat/threads/:threadid/read", optionalauth, markChatThreadRead);
+router.patch("/chat/threads/:threadid/block", optionalauth, toggleThreadBlock);
+router.post("/chat/reports", optionalauth, upload.any(), createSellerReport);
+router.get("/admin/panel/chat-reports", isauth, getAdminChatReports);
+router.patch("/admin/panel/chat-reports/:reportid/decision", isauth, decideChatReport);
 
 module.exports = router;
