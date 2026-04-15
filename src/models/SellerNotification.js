@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { pushKhanNotification } = require("../utils/KhanNotifier");
 
 const sellernotificationSchema = new mongoose.Schema(
   {
@@ -16,5 +17,26 @@ const sellernotificationSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+sellernotificationSchema.post("save", async function sellerNotificationMirror(doc) {
+  try {
+    await pushKhanNotification({
+      recipientkind: "seller",
+      recipientid: doc.sellerid,
+      type: doc.type || "Info",
+      channel: "seller",
+      title: doc.title || "Seller notification",
+      message: doc.message || "",
+      metadata: {
+        source: "seller_notification",
+        sellernotificationid: String(doc._id),
+        shopid: doc.shopid ? String(doc.shopid) : "",
+        ...(doc.metadata || {}),
+      },
+    });
+  } catch (_error) {
+    // non-blocking mirror
+  }
+});
 
 module.exports = mongoose.model("SellerNotification", sellernotificationSchema);

@@ -6,6 +6,12 @@ const homebannerschema=new mongoose.Schema({
     type:String,
     path:String, // cloudinary url
   },
+  sectionkey: {
+    type: String,
+    enum: ["home", "bestselling", "fivestar"],
+    default: "home",
+    index: true,
+  },
   navigationlink:{
 
 
@@ -21,5 +27,5 @@ const homebannerschema=new mongoose.Schema({
 
 
 
-})
+},{timestamps:true})
 module.exports=mongoose.model("homebanner",homebannerschema)

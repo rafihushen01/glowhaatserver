@@ -54,6 +54,10 @@ const {
   deleteChatMessage,
   markChatThreadRead,
   toggleThreadBlock,
+  toggleThreadPin,
+  toggleThreadMute,
+  toggleThreadArchive,
+  searchChatMessages,
   createSellerReport,
   getAdminChatReports,
   decideChatReport,
@@ -152,6 +156,10 @@ router.post("/chat/threads/:threadid/messages", optionalauth, upload.any(), send
 router.delete("/chat/threads/:threadid/messages/:messageid", optionalauth, deleteChatMessage);
 router.patch("/chat/threads/:threadid/read", optionalauth, markChatThreadRead);
 router.patch("/chat/threads/:threadid/block", optionalauth, toggleThreadBlock);
+router.patch("/chat/threads/:threadid/pin", optionalauth, toggleThreadPin);
+router.patch("/chat/threads/:threadid/mute", optionalauth, toggleThreadMute);
+router.patch("/chat/threads/:threadid/archive", optionalauth, toggleThreadArchive);
+router.get("/chat/search", optionalauth, searchChatMessages);
 router.post("/chat/reports", optionalauth, upload.any(), createSellerReport);
 router.get("/admin/panel/chat-reports", isauth, getAdminChatReports);
 router.patch("/admin/panel/chat-reports/:reportid/decision", isauth, decideChatReport);

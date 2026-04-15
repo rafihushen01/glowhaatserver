@@ -9,7 +9,7 @@ const path = require("path")
 const { Server } = require("socket.io")
 const mongoose = require("mongoose")
 const compression = require("compression")
-const { setSocketServer } = require("../utils/SocketServer")
+const { setSocketServer, markActorOnline, markSocketOffline, getActorPresence } = require("../utils/SocketServer")
 
 dotenv.config({ path: path.resolve(__dirname, "../../.env") })
 
@@ -33,6 +33,7 @@ const engagementrouter=require("../routers/EngagementRouter.js")
 const wishlistrouter=require("../routers/WishlistRouter.js")
 const recommendationrouter=require("../routers/RecommendationRouter.js")
 const sellerrouter=require("../routers/SellerRouter.js")
+const khannotificationrouter=require("../routers/KhanNotificationRouter.js")
 /* ===================== SOCKET.IO (REAL-TIME & FAST) ===================== */
 const normalizeOrigin = (value = "") => String(value).trim().replace(/\/+$/, "")
 const allowedOrigins = [
@@ -64,7 +65,77 @@ io.on("connection", (socket) => {
     io.to(data.roomid).emit("receive_message", data)
   })
 
+  socket.on("notification_room_join", (payload = {}) => {
+    const kind = String(payload?.kind || "").trim().toLowerCase()
+    const id = String(payload?.id || "").trim()
+    if (!kind || !id) return
+    socket.join(`notification:${kind}:${id}`)
+  })
+
+  socket.on("chat_typing", (payload = {}) => {
+    const threadId = String(payload?.threadid || "").trim()
+    if (!threadId) return
+    io.to(`chat:${threadId}`).emit("chat_typing", {
+      threadid: threadId,
+      actorid: String(payload?.actorid || ""),
+      actortype: String(payload?.actortype || ""),
+      typing: Boolean(payload?.typing),
+      at: new Date(),
+    })
+  })
+
+  socket.on("presence_ping", (payload = {}) => {
+    const actorType = String(payload?.actortype || "").trim().toLowerCase()
+    const actorId = String(payload?.actorid || "").trim()
+    const threadId = String(payload?.threadid || "").trim()
+
+    if (!actorType || !actorId) return
+
+    markActorOnline({ type: actorType, id: actorId, socketId: socket.id })
+    socket.data.presence = { actorType, actorId }
+
+    if (threadId) {
+      io.to(`chat:${threadId}`).emit("chat_presence_update", {
+        threadid: threadId,
+        actortype: actorType,
+        actorid: actorId,
+        online: true,
+        lastseenat: null,
+      })
+    }
+  })
+
+  socket.on("presence_get", (payload = {}, callback) => {
+    const actorType = String(payload?.actortype || "").trim().toLowerCase()
+    const actorId = String(payload?.actorid || "").trim()
+    if (!actorType || !actorId) {
+      if (typeof callback === "function") callback({ online: false, lastseenat: null })
+      return
+    }
+
+    const state = getActorPresence({ type: actorType, id: actorId })
+    if (typeof callback === "function") {
+      callback({ online: Boolean(state.online), lastseenat: state.lastSeenAt || null })
+    }
+  })
+
   socket.on("disconnect", () => {
+    const presence = socket.data?.presence || {}
+    const actorType = String(presence.actorType || "").trim().toLowerCase()
+    const actorId = String(presence.actorId || "").trim()
+
+    markSocketOffline(socket.id)
+
+    if (actorType && actorId) {
+      const state = getActorPresence({ type: actorType, id: actorId })
+      io.emit("chat_presence_update", {
+        actortype: actorType,
+        actorid: actorId,
+        online: Boolean(state.online),
+        lastseenat: state.lastSeenAt || null,
+      })
+    }
+
     console.log("🔴 Socket disconnected:", socket.id)
   })
 })
@@ -165,6 +236,7 @@ app.use("/engagement", engagementrouter)
 app.use("/wishlist", wishlistrouter)
 app.use("/recommendation", recommendationrouter)
 app.use("/seller", sellerrouter)
+app.use("/khannotification",khannotificationrouter)
 /* ===================== GLOBAL ERROR HANDLER ===================== */
 app.use((err, req, res, next) => {
   console.error("🔥 Server Error:", err)

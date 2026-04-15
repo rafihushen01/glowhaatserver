@@ -9,6 +9,7 @@ const SellerShop = require("../models/SellerShop");
 const { attachSellerOrdersFromMainOrder } = require("./SellerPanelController");
 const { resolveActor, recordBehaviorSignal } = require("../utils/RecommendationSignals");
 const { calculateDeliveryCharge } = require("../utils/DeliveryPricing");
+const { pushKhanNotification } = require("../utils/KhanNotifier");
 
 const ALLOWED_STATUSES = ["placed", "processing", "shipped", "delivered", "returned", "canceled"];
 const ALLOWED_PAYMENT_METHODS = ["cod", "bkash", "nagad", "bank"];
@@ -251,6 +252,51 @@ exports.placeorder = async (req, res) => {
       );
     }
 
+    if (requestactor.userid) {
+      await pushKhanNotification({
+        recipientkind: "user",
+        recipientid: requestactor.userid,
+        type: "Success",
+        channel: "order",
+        title: "Order placed successfully",
+        message: `Your order ${ordernumber} has been placed successfully.`,
+        metadata: { orderid: String(order._id), ordernumber },
+      });
+    }
+
+    const orderedProducts = await Item.find({ _id: { $in: items.map((entry) => entry.productid).filter(Boolean) } })
+      .select("_id sellerid")
+      .lean();
+    const sellerIds = Array.from(new Set((orderedProducts || []).map((entry) => String(entry?.sellerid || "")).filter(Boolean)));
+    await Promise.all(
+      sellerIds.map((sellerId) =>
+        pushKhanNotification({
+          recipientkind: "seller",
+          recipientid: sellerId,
+          type: "Info",
+          channel: "order",
+          title: "New order received",
+          message: `A new order ${ordernumber} includes your product.`,
+          metadata: { orderid: String(order._id), ordernumber },
+        })
+      )
+    );
+
+    const superAdmins = await User.find({ role: "SuperAdmin" }).select("_id").lean();
+    await Promise.all(
+      (superAdmins || []).map((admin) =>
+        pushKhanNotification({
+          recipientkind: "superadmin",
+          recipientid: admin._id,
+          type: "Info",
+          channel: "order",
+          title: "New order placed",
+          message: `Order ${ordernumber} was placed.`,
+          metadata: { orderid: String(order._id), ordernumber },
+        })
+      )
+    );
+
     return res.status(201).json({
       success: true,
       message: "Order placed successfully",
@@ -388,6 +434,36 @@ exports.updateorderstatus = async (req, res) => {
       changedat: new Date(),
     });
     await order.save();
+
+    if (order.userid) {
+      await pushKhanNotification({
+        recipientkind: "user",
+        recipientid: order.userid,
+        type: "Info",
+        channel: "order",
+        title: "Order status updated",
+        message: `Your order ${order.ordernumber} status is now ${status}.`,
+        metadata: { orderid: String(order._id), status },
+      });
+    }
+
+    const orderedProducts = await Item.find({ _id: { $in: (order.items || []).map((entry) => entry.productid).filter(Boolean) } })
+      .select("_id sellerid")
+      .lean();
+    const sellerIds = Array.from(new Set((orderedProducts || []).map((entry) => String(entry?.sellerid || "")).filter(Boolean)));
+    await Promise.all(
+      sellerIds.map((sellerId) =>
+        pushKhanNotification({
+          recipientkind: "seller",
+          recipientid: sellerId,
+          type: "Info",
+          channel: "order",
+          title: "Order lifecycle update",
+          message: `Order ${order.ordernumber} is now ${status}.`,
+          metadata: { orderid: String(order._id), status },
+        })
+      )
+    );
 
     return res.status(200).json({
       success: true,

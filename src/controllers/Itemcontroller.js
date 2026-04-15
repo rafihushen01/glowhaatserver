@@ -4,6 +4,9 @@ const Item = require("../models/Item.js");
 const generateUniqueSlug = require("../utils/GenerateUniqueSlug.js");
 const Nav = require("../models/Nav.js");
 const Order = require("../models/Order.js");
+const Homebanner = require("../models/Homebanner.js");
+const UserProductBehavior = require("../models/UserProductBehavior.js");
+const SellerRequest = require("../models/SellerRequest.js");
 
 const buildCategoryTree = async (categoryids) => {
   const categories = await Nav.find({
@@ -548,6 +551,317 @@ const getProductsBySegmentSlug = async (slug) => {
   return products.filter((item) => itemBelongsToSegment(item, slug));
 };
 
+const DISCOVERY_WINDOWS = [4, 7, 14, 30];
+
+const normalizeWindowDays = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 30;
+  return DISCOVERY_WINDOWS.includes(n) ? n : 30;
+};
+
+const normalizeRank = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const rank = Math.trunc(n);
+  if (rank < 1 || rank > 40) return null;
+  return rank;
+};
+
+const normalizePage = (value, fallback = 1) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.trunc(n));
+};
+
+const normalizeLimit = (value, fallback = 30, max = 60) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(max, Math.trunc(n)));
+};
+
+const resolveWindowStart = (days) => {
+  const now = Date.now();
+  return new Date(now - days * 24 * 60 * 60 * 1000);
+};
+
+const toObjectIds = (products = []) =>
+  products
+    .map((p) => String(p?._id || ""))
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+const getProductCategoryTokens = (product) => {
+  const tokens = new Set([
+    ...extractCategoryTokens(product),
+    ...extractLeafCategoryTokens(product),
+  ]);
+  return Array.from(tokens);
+};
+
+const productMatchesCategory = (product, categoryslug) => {
+  const normalized = slugifyLoose(categoryslug);
+  if (!normalized || normalized === "all") return true;
+  const tokens = getProductCategoryTokens(product);
+  return tokens.includes(normalized);
+};
+
+const productMatchesBrand = (product, brand) => {
+  const normalized = normalizeText(brand).toLowerCase();
+  if (!normalized) return true;
+  return normalizeText(product?.brand).toLowerCase() === normalized;
+};
+
+const productHasColor = (product, color) => {
+  const normalized = normalizeText(color).toLowerCase();
+  if (!normalized) return true;
+  const colors = getVariantValues(product, "color").map((entry) => normalizeText(entry).toLowerCase());
+  return colors.includes(normalized);
+};
+
+const buildProductSignalMap = async (productObjectIds = [], startDate = null) => {
+  if (!productObjectIds.length) return new Map();
+
+  const match = { productid: { $in: productObjectIds } };
+  if (startDate) match.lastinteractedat = { $gte: startDate };
+
+  const rows = await UserProductBehavior.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: "$productid",
+        clickcount: { $sum: "$clickcount" },
+        detailviewcount: { $sum: "$detailviewcount" },
+        signalscore: { $sum: "$signalscore" },
+      },
+    },
+  ]);
+
+  return new Map(
+    rows.map((row) => [
+      String(row._id),
+      {
+        clickcount: Number(row.clickcount || 0),
+        detailviewcount: Number(row.detailviewcount || 0),
+        signalscore: Number(row.signalscore || 0),
+      },
+    ])
+  );
+};
+
+const buildBestSellerRankings = async ({ products = [], days = 30, categoryslug = "" }) => {
+  const filtered = products.filter((product) => productMatchesCategory(product, categoryslug));
+  if (!filtered.length) return [];
+
+  const productObjectIds = toObjectIds(filtered);
+  if (!productObjectIds.length) return [];
+
+  const startDate = resolveWindowStart(days);
+
+  const [orderRows, repeatRows, signalMap] = await Promise.all([
+    Order.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startDate },
+          status: { $in: ["delivered", "returned", "canceled"] },
+          "items.productid": { $in: productObjectIds },
+        },
+      },
+      { $unwind: "$items" },
+      { $match: { "items.productid": { $in: productObjectIds } } },
+      {
+        $group: {
+          _id: "$items.productid",
+          deliveredqty: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "delivered"] }, { $ifNull: ["$items.quantity", 0] }, 0],
+            },
+          },
+          deliveredorders: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "delivered"] }, 1, 0],
+            },
+          },
+          canceledqty: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "canceled"] }, { $ifNull: ["$items.quantity", 0] }, 0],
+            },
+          },
+          returnedqty: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "returned"] }, { $ifNull: ["$items.quantity", 0] }, 0],
+            },
+          },
+        },
+      },
+    ]),
+    Order.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startDate },
+          status: "delivered",
+          "items.productid": { $in: productObjectIds },
+        },
+      },
+      { $unwind: "$items" },
+      { $match: { "items.productid": { $in: productObjectIds } } },
+      {
+        $group: {
+          _id: {
+            productid: "$items.productid",
+            customerkey: {
+              $cond: [
+                { $ifNull: ["$userid", false] },
+                { $toString: "$userid" },
+                "$ownerid",
+              ],
+            },
+          },
+          deliveredordersbycustomer: { $sum: 1 },
+          deliveredqtybycustomer: { $sum: { $ifNull: ["$items.quantity", 0] } },
+        },
+      },
+      {
+        $group: {
+          _id: "$_id.productid",
+          repeatcustomers: {
+            $sum: {
+              $cond: [{ $gt: ["$deliveredordersbycustomer", 1] }, 1, 0],
+            },
+          },
+          repeatqty: {
+            $sum: {
+              $cond: [{ $gt: ["$deliveredordersbycustomer", 1] }, "$deliveredqtybycustomer", 0],
+            },
+          },
+        },
+      },
+    ]),
+    buildProductSignalMap(productObjectIds, startDate),
+  ]);
+
+  const orderMap = new Map(
+    orderRows.map((row) => [
+      String(row._id),
+      {
+        deliveredqty: Number(row.deliveredqty || 0),
+        deliveredorders: Number(row.deliveredorders || 0),
+        canceledqty: Number(row.canceledqty || 0),
+        returnedqty: Number(row.returnedqty || 0),
+      },
+    ])
+  );
+
+  const repeatMap = new Map(
+    repeatRows.map((row) => [
+      String(row._id),
+      {
+        repeatcustomers: Number(row.repeatcustomers || 0),
+        repeatqty: Number(row.repeatqty || 0),
+      },
+    ])
+  );
+
+  const scored = filtered.map((product) => {
+    const id = String(product._id);
+    const orderStats = orderMap.get(id) || {
+      deliveredqty: 0,
+      deliveredorders: 0,
+      canceledqty: 0,
+      returnedqty: 0,
+    };
+    const repeatStats = repeatMap.get(id) || {
+      repeatcustomers: 0,
+      repeatqty: 0,
+    };
+    const signals = signalMap.get(id) || {
+      clickcount: 0,
+      detailviewcount: 0,
+      signalscore: 0,
+    };
+
+    const rating = Math.max(0, Math.min(5, Number(product.star || 0)));
+    const reviews = Math.max(0, Number(product.reviewcount || 0));
+
+    const sponsorBonus =
+      Boolean(product?.sponsorship?.isactive) &&
+      product?.sponsorship?.endsat &&
+      new Date(product.sponsorship.endsat).getTime() > Date.now()
+        ? Number(product?.sponsorship?.boostedscore || product?.sponsorship?.amount || 0)
+        : 0;
+
+    const score =
+      orderStats.deliveredqty * 3.3 +
+      orderStats.deliveredorders * 2.6 +
+      repeatStats.repeatcustomers * 12 +
+      repeatStats.repeatqty * 2.2 +
+      rating * 8 +
+      Math.min(200, reviews) * 0.7 +
+      signals.clickcount * 0.45 +
+      signals.detailviewcount * 0.62 +
+      signals.signalscore * 0.03 +
+      sponsorBonus -
+      orderStats.canceledqty * 4.4 -
+      orderStats.returnedqty * 6.2;
+
+    return {
+      ...product,
+      bestsellerscore: Number(score.toFixed(4)),
+      bestsellerstats: {
+        days,
+        deliveredqty: orderStats.deliveredqty,
+        deliveredorders: orderStats.deliveredorders,
+        repeatcustomers: repeatStats.repeatcustomers,
+        repeatqty: repeatStats.repeatqty,
+        canceledqty: orderStats.canceledqty,
+        returnedqty: orderStats.returnedqty,
+        clickcount: signals.clickcount,
+        detailviewcount: signals.detailviewcount,
+      },
+    };
+  });
+
+  scored.sort((a, b) => {
+    if (b.bestsellerscore !== a.bestsellerscore) return b.bestsellerscore - a.bestsellerscore;
+    if (b.bestsellerstats.deliveredqty !== a.bestsellerstats.deliveredqty) {
+      return b.bestsellerstats.deliveredqty - a.bestsellerstats.deliveredqty;
+    }
+    return new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0);
+  });
+
+  return scored.map((product, index) => ({
+    ...product,
+    isbestseller: index < 40,
+    bestsellerrank: index + 1,
+  }));
+};
+
+const resolveActorIdForDiscovery = (req, sessionkey = "") => {
+  const userid = String(req?.user?.userId || "");
+  if (mongoose.Types.ObjectId.isValid(userid)) return `user:${userid}`;
+  const safeSession = normalizeText(sessionkey);
+  if (safeSession) return `guest:${safeSession}`;
+  return "";
+};
+
+const buildActorBoostMap = async (actorid = "", productIds = []) => {
+  if (!actorid || !productIds.length) return new Map();
+  const rows = await UserProductBehavior.find({
+    actorid,
+    productid: { $in: productIds },
+  })
+    .select("productid signalscore clickcount detailviewcount")
+    .lean();
+
+  return new Map(
+    rows.map((row) => [
+      String(row.productid),
+      Number(row.signalscore || 0) +
+        Number(row.clickcount || 0) * 0.8 +
+        Number(row.detailviewcount || 0) * 0.6,
+    ])
+  );
+};
+
 exports.createItem = async (req, res) => {
   try {
     const body = { ...req.body };
@@ -800,7 +1114,28 @@ exports.getitem = async (req, res) => {
       return res.json({ success: false, message: "Item not found" });
     }
 
-    return res.json({ success: true, item });
+    let sellerprofile = null;
+    if (item?.sellerid?._id) {
+      const signup = await SellerRequest.findOne({
+        userid: item.sellerid._id,
+        status: "Approved",
+      })
+        .sort({ reviewedat: -1, createdAt: -1 })
+        .select("storetype preferredcategories businessmodel")
+        .lean();
+
+      if (signup) {
+        sellerprofile = {
+          storetype: signup.storetype || "",
+          preferredcategories: Array.isArray(signup.preferredcategories) ? signup.preferredcategories.filter(Boolean) : [],
+          businessmodel: signup.businessmodel || "",
+        };
+      }
+    }
+
+    const payload = item.toObject ? item.toObject() : item;
+    payload.sellerprofile = sellerprofile;
+    return res.json({ success: true, item: payload });
   } catch (err) {
     return res.json({ success: false, message: err.message });
   }
@@ -925,6 +1260,291 @@ exports.filtercategoryproduct = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Filtering failed",
+    });
+  }
+};
+
+exports.getDiscoveryBestSellers = async (req, res) => {
+  try {
+    const days = normalizeWindowDays(req.query?.days);
+    const page = normalizePage(req.query?.page, 1);
+    const limit = normalizeLimit(req.query?.limit, 30, 60);
+    const rank = normalizeRank(req.query?.rank);
+    const categoryslug = slugifyLoose(req.query?.categoryslug || "");
+    const minrating = toNumberOrNull(req.query?.minrating);
+    const sessionkey = normalizeText(req.query?.sessionkey);
+
+    const allProducts = await Item.find({ isactive: true })
+      .select("-__v")
+      .lean();
+
+    const ratingFiltered = allProducts.filter((product) => {
+      if (minrating === null) return true;
+      return Number(product.star || 0) >= Number(minrating || 0);
+    });
+
+    let ranked = await buildBestSellerRankings({
+      products: ratingFiltered,
+      days,
+      categoryslug,
+    });
+
+    const actorid = resolveActorIdForDiscovery(req, sessionkey);
+    const actorBoostMap = await buildActorBoostMap(
+      actorid,
+      toObjectIds(ranked)
+    );
+
+    ranked = ranked.map((product) => {
+      const boost = Number(actorBoostMap.get(String(product._id)) || 0);
+      return {
+        ...product,
+        recommendationboost: Number(boost.toFixed(3)),
+        discoveryscore: Number((product.bestsellerscore + boost * 0.06).toFixed(3)),
+      };
+    });
+
+    ranked.sort((a, b) => {
+      if (b.discoveryscore !== a.discoveryscore) return b.discoveryscore - a.discoveryscore;
+      return a.bestsellerrank - b.bestsellerrank;
+    });
+
+    ranked = ranked.map((product, index) => ({
+      ...product,
+      bestsellerrank: index + 1,
+      isbestseller: index < 40,
+    }));
+
+    const topForty = ranked.slice(0, 40);
+    const rankFiltered = rank ? topForty.filter((product) => product.bestsellerrank === rank) : topForty;
+
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    const items = rank ? rankFiltered : rankFiltered.slice(start, end);
+
+    return res.status(200).json({
+      success: true,
+      meta: {
+        section: "bestselling",
+        days,
+        categoryslug: categoryslug || "all",
+        rank,
+        page,
+        limit,
+        total: rankFiltered.length,
+        hasmore: !rank && end < rankFiltered.length,
+        availableranks: topForty.map((product) => product.bestsellerrank),
+      },
+      items,
+    });
+  } catch (error) {
+    console.error("getDiscoveryBestSellers error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load best selling products",
+    });
+  }
+};
+
+exports.getDiscoveryTopRated = async (req, res) => {
+  try {
+    const page = normalizePage(req.query?.page, 1);
+    const limit = normalizeLimit(req.query?.limit, 30, 60);
+    const categoryslug = slugifyLoose(req.query?.categoryslug || "");
+    const starfrom = toNumberOrNull(req.query?.starfrom);
+    const starto = toNumberOrNull(req.query?.starto);
+    const brand = normalizeText(req.query?.brand);
+    const color = normalizeText(req.query?.color);
+    const sessionkey = normalizeText(req.query?.sessionkey);
+
+    const minprice = toNumberOrNull(req.query?.minprice);
+    const maxprice = toNumberOrNull(req.query?.maxprice);
+
+    let products = await Item.find({ isactive: true })
+      .select("-__v")
+      .lean();
+
+    const minStar = starfrom === null ? 5 : Math.max(1, Math.min(5, Number(starfrom)));
+    const maxStar = starto === null ? 5 : Math.max(minStar, Math.min(5, Number(starto)));
+
+    products = products.filter((product) => {
+      const star = Number(product.star || 0);
+      if (star < minStar || star > maxStar) return false;
+      if (!productMatchesCategory(product, categoryslug)) return false;
+      if (!productMatchesBrand(product, brand)) return false;
+      if (!productHasColor(product, color)) return false;
+
+      const price = getProductPrice(product);
+      if (minprice !== null && price < minprice) return false;
+      if (maxprice !== null && price > maxprice) return false;
+      return true;
+    });
+
+    const actorid = resolveActorIdForDiscovery(req, sessionkey);
+    const actorBoostMap = await buildActorBoostMap(actorid, toObjectIds(products));
+
+    let ranked = products.map((product) => {
+      const actorBoost = Number(actorBoostMap.get(String(product._id)) || 0);
+      const score =
+        Number(product.star || 0) * 12 +
+        Math.min(500, Number(product.reviewcount || 0)) * 0.7 +
+        Number(product.totalsold || 0) * 0.2 +
+        actorBoost * 0.08;
+      return {
+        ...product,
+        topratedscore: Number(score.toFixed(3)),
+      };
+    });
+
+    ranked.sort((a, b) => {
+      if (b.topratedscore !== a.topratedscore) return b.topratedscore - a.topratedscore;
+      return new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0);
+    });
+
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    const items = ranked.slice(start, end);
+
+    return res.status(200).json({
+      success: true,
+      meta: {
+        section: "fivestar",
+        page,
+        limit,
+        total: ranked.length,
+        hasmore: end < ranked.length,
+        starfrom: minStar,
+        starto: maxStar,
+      },
+      items,
+    });
+  } catch (error) {
+    console.error("getDiscoveryTopRated error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load top rated products",
+    });
+  }
+};
+
+exports.getDiscoveryNewIn = async (req, res) => {
+  try {
+    const page = normalizePage(req.query?.page, 1);
+    const limit = normalizeLimit(req.query?.limit, 30, 60);
+    const days = normalizeWindowDays(req.query?.days || 30);
+    const categoryslug = slugifyLoose(req.query?.categoryslug || "");
+    const brand = normalizeText(req.query?.brand);
+    const color = normalizeText(req.query?.color);
+    const sessionkey = normalizeText(req.query?.sessionkey);
+
+    const minstar = toNumberOrNull(req.query?.minstar);
+    const maxstar = toNumberOrNull(req.query?.maxstar);
+    const minprice = toNumberOrNull(req.query?.minprice);
+    const maxprice = toNumberOrNull(req.query?.maxprice);
+
+    const createdAfter = resolveWindowStart(days);
+
+    let products = await Item.find({
+      isactive: true,
+      createdAt: { $gte: createdAfter },
+    })
+      .select("-__v")
+      .lean();
+
+    const bestSellerWanted = String(req.query?.bestselling || "").trim() === "1";
+    let bestSellerRanks = new Map();
+
+    if (bestSellerWanted) {
+      const ranked = await buildBestSellerRankings({
+        products,
+        days: 30,
+        categoryslug,
+      });
+      bestSellerRanks = new Map(
+        ranked.slice(0, 40).map((product) => [String(product._id), product.bestsellerrank])
+      );
+    }
+
+    products = products.filter((product) => {
+      if (!productMatchesCategory(product, categoryslug)) return false;
+      if (!productMatchesBrand(product, brand)) return false;
+      if (!productHasColor(product, color)) return false;
+
+      const star = Number(product.star || 0);
+      if (minstar !== null && star < minstar) return false;
+      if (maxstar !== null && star > maxstar) return false;
+
+      const price = getProductPrice(product);
+      if (minprice !== null && price < minprice) return false;
+      if (maxprice !== null && price > maxprice) return false;
+
+      if (bestSellerWanted && !bestSellerRanks.has(String(product._id))) return false;
+      return true;
+    });
+
+    const actorid = resolveActorIdForDiscovery(req, sessionkey);
+    const actorBoostMap = await buildActorBoostMap(actorid, toObjectIds(products));
+
+    let ranked = products.map((product) => {
+      const freshnessWeight = 1000 - (Date.now() - new Date(product.createdAt || product.createdat || 0).getTime()) / (1000 * 60 * 60);
+      const actorBoost = Number(actorBoostMap.get(String(product._id)) || 0);
+      return {
+        ...product,
+        isbestseller: bestSellerRanks.has(String(product._id)),
+        bestsellerrank: bestSellerRanks.get(String(product._id)) || null,
+        newinscore: Number((freshnessWeight + actorBoost * 0.05 + Number(product.star || 0) * 4).toFixed(3)),
+      };
+    });
+
+    ranked.sort((a, b) => {
+      if (b.newinscore !== a.newinscore) return b.newinscore - a.newinscore;
+      return new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0);
+    });
+
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    const items = ranked.slice(start, end);
+
+    return res.status(200).json({
+      success: true,
+      meta: {
+        section: "newin",
+        days,
+        page,
+        limit,
+        total: ranked.length,
+        hasmore: end < ranked.length,
+      },
+      items,
+    });
+  } catch (error) {
+    console.error("getDiscoveryNewIn error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load new in products",
+    });
+  }
+};
+
+exports.getDiscoveryCms = async (req, res) => {
+  try {
+    const [bestSellingBanner, fiveStarBanner] = await Promise.all([
+      Homebanner.find({ sectionkey: "bestselling" }).sort({ bannernumber: 1, createdAt: -1 }).limit(1).lean(),
+      Homebanner.find({ sectionkey: "fivestar" }).sort({ bannernumber: 1, createdAt: -1 }).limit(1).lean(),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        bestselling: bestSellingBanner[0] || null,
+        fivestar: fiveStarBanner[0] || null,
+      },
+    });
+  } catch (error) {
+    console.error("getDiscoveryCms error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load discovery CMS data",
     });
   }
 };

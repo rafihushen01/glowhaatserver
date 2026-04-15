@@ -8,13 +8,20 @@ const SellerNotification = require("../models/SellerNotification");
 const User = require("../models/User");
 const Item = require("../models/Item");
 const uploadoncloudinary = require("../utils/Cloudinary");
-const { getSocketServer } = require("../utils/SocketServer");
+const { getSocketServer, getActorPresence } = require("../utils/SocketServer");
+const { encryptChatText, decryptChatText } = require("../utils/ChatCrypto");
+const { pushKhanNotification } = require("../utils/KhanNotifier");
 
 const normalizeText = (value = "") => String(value || "").trim();
 const normalizeGuestId = (value = "") => normalizeText(value).slice(0, 100);
 const toNumber = (value, fallback = 0) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+};
+const toBool = (value) => {
+  if (typeof value === "boolean") return value;
+  const normalized = normalizeText(value).toLowerCase();
+  return ["1", "true", "yes", "on"].includes(normalized);
 };
 
 const parseGuestSessionFromRequest = (req, source = {}) => {
@@ -120,12 +127,37 @@ const uploadMediaFromFiles = async (files = []) => {
   return prepared;
 };
 
+const resolveRefId = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value._id) return String(value._id);
+  return String(value);
+};
+
+const actorToNotificationKind = (role = "") => {
+  const normalized = normalizeText(role).toLowerCase();
+  if (normalized === "seller") return "seller";
+  if (normalized === "superadmin") return "superadmin";
+  return "user";
+};
+
+const resolveMessageText = (message = {}) => {
+  if (message?.isdeleted) return "This message was deleted.";
+  const decrypted = decryptChatText({
+    cipher: message?.textenc || "",
+    iv: message?.textiv || "",
+    tag: message?.texttag || "",
+  });
+  const plain = normalizeText(message?.text);
+  return decrypted || plain;
+};
+
 const canActorAccessThread = (thread, actor) => {
-  if (String(thread?.sellerid || "") === String(actor?.userId || "")) {
+  if (resolveRefId(thread?.sellerid) === String(actor?.userId || "")) {
     return { allowed: true, side: "seller" };
   }
 
-  if (actor?.type === "user" && String(thread?.buyerid || "") === String(actor?.userId || "")) {
+  if (actor?.type === "user" && resolveRefId(thread?.buyerid) === String(actor?.userId || "")) {
     return { allowed: true, side: "buyer" };
   }
 
@@ -152,14 +184,42 @@ const emitSellerHealth = (sellerId, payload = {}) => {
   io.to(`seller:${sellerId}`).emit("seller_health_update", payload);
 };
 
+const resolveCounterpartPresence = (thread, actor) => {
+  const access = canActorAccessThread(thread, actor);
+  if (!access.allowed) return { online: false, lastseenat: null };
+
+  if (access.side === "seller") {
+    if (thread?.buyerid?._id) {
+      const state = getActorPresence({ type: "user", id: String(thread.buyerid._id) });
+      return { online: Boolean(state.online), lastseenat: state.lastSeenAt || null };
+    }
+
+    if (thread?.guestsessionid) {
+      const state = getActorPresence({ type: "guest", id: String(thread.guestsessionid) });
+      return { online: Boolean(state.online), lastseenat: state.lastSeenAt || null };
+    }
+
+    return { online: false, lastseenat: null };
+  }
+
+  if (thread?.sellerid?._id) {
+    const state = getActorPresence({ type: "user", id: String(thread.sellerid._id) });
+    return { online: Boolean(state.online), lastseenat: state.lastSeenAt || null };
+  }
+
+  return { online: false, lastseenat: null };
+};
+
 const serializeThreadList = (thread, actor) => {
   const actorSide = canActorAccessThread(thread, actor).side;
   const isSeller = actorSide === "seller";
   const counterpart = isSeller ? thread?.buyerid : thread?.sellerid;
   const guestDisplay = thread?.guestname || "Guest";
+  const counterpartPresence = resolveCounterpartPresence(thread, actor);
 
   return {
     _id: thread._id,
+    guestsessionid: thread.guestsessionid || "",
     shop: thread.shopid
       ? {
           _id: thread.shopid._id,
@@ -183,6 +243,7 @@ const serializeThreadList = (thread, actor) => {
           usersavatar: counterpart?.usersavatar || "",
           role: counterpart?.role || "Guest",
           isguest: !counterpart?._id,
+          sessionid: counterpart?._id ? "" : thread?.guestsessionid || "",
         }
       : {
           _id: counterpart?._id || null,
@@ -190,59 +251,121 @@ const serializeThreadList = (thread, actor) => {
           usersavatar: counterpart?.usersavatar || "",
           role: counterpart?.role || "Seller",
           isguest: false,
+          sessionid: "",
         },
     lastmessage: thread.lastmessage || "",
     lastmessagedat: thread.lastmessagedat,
     unread: isSeller ? Number(thread.unreadforseller || 0) : Number(thread.unreadforbuyer || 0),
+    pinned: isSeller ? Boolean(thread.pinnedbyseller) : Boolean(thread.pinnedbybuyer),
+    pinnedat: isSeller ? thread.pinnedatseller || null : thread.pinnedatbuyer || null,
+    muted: isSeller ? Boolean(thread.mutedbyseller) : Boolean(thread.mutedbybuyer),
+    mutedat: isSeller ? thread.mutedatseller || null : thread.mutedatbuyer || null,
+    archived: isSeller ? Boolean(thread.archivedbyseller) : Boolean(thread.archivedbybuyer),
+    archivedat: isSeller ? thread.archivedatseller || null : thread.archivedatbuyer || null,
     blockedbybuyer: Boolean(thread.blockedbybuyer),
     blockedbyseller: Boolean(thread.blockedbyseller),
+    counterpartonline: Boolean(counterpartPresence.online),
+    counterpartlastseenat: counterpartPresence.lastseenat || null,
     updatedAt: thread.updatedAt,
   };
 };
 
-const serializeThreadDetail = (thread) => ({
-  _id: thread._id,
-  buyerid: thread.buyerid,
-  guestsessionid: thread.guestsessionid,
-  guestname: thread.guestname || "Guest",
-  sellerid: thread.sellerid,
-  shopid: thread.shopid,
-  productid: thread.productid,
-  lastmessage: thread.lastmessage || "",
-  lastmessagedat: thread.lastmessagedat,
-  unreadforbuyer: Number(thread.unreadforbuyer || 0),
-  unreadforseller: Number(thread.unreadforseller || 0),
-  blockedbybuyer: Boolean(thread.blockedbybuyer),
-  blockedbyseller: Boolean(thread.blockedbyseller),
-  blockreasonbuyer: thread.blockreasonbuyer || "",
-  blockreasonseller: thread.blockreasonseller || "",
-  messages: (thread.messages || []).map((message) => ({
-    _id: message._id,
-    senderid: message.senderid,
-    senderkind: message.senderkind,
-    senderguestsessionid: message.senderguestsessionid,
-    senderguestname: message.senderguestname,
-    senderrole: message.senderrole,
-    text: message.isdeleted ? "This message was deleted." : message.text,
-    media: message.isdeleted ? [] : message.media,
-    readbybuyer: Boolean(message.readbybuyer),
-    readbyseller: Boolean(message.readbyseller),
-    isdeleted: Boolean(message.isdeleted),
-    deletedby: message.deletedby || "",
-    deletedat: message.deletedat,
-    createdat: message.createdat,
-  })),
-  createdAt: thread.createdAt,
-  updatedAt: thread.updatedAt,
-});
+const serializeThreadDetail = (thread, actor = null) => {
+  const access = actor ? canActorAccessThread(thread, actor) : { side: "" };
+  const isSeller = access.side === "seller";
+  const counterpartPresence = actor ? resolveCounterpartPresence(thread, actor) : { online: false, lastseenat: null };
+  const counterpart = isSeller ? thread?.buyerid : thread?.sellerid;
+  const guestDisplay = thread?.guestname || "Guest";
+
+  return {
+    _id: thread._id,
+    buyerid: thread.buyerid,
+    guestsessionid: thread.guestsessionid,
+    guestname: thread.guestname || "Guest",
+    sellerid: thread.sellerid,
+    counterpart: isSeller
+      ? {
+          _id: counterpart?._id || null,
+          fullname: counterpart?.fullname || guestDisplay,
+          usersavatar: counterpart?.usersavatar || "",
+          role: counterpart?.role || "Guest",
+          isguest: !counterpart?._id,
+          sessionid: counterpart?._id ? "" : thread?.guestsessionid || "",
+        }
+      : {
+          _id: counterpart?._id || null,
+          fullname: counterpart?.fullname || "Seller",
+          usersavatar: counterpart?.usersavatar || "",
+          role: counterpart?.role || "Seller",
+          isguest: false,
+          sessionid: "",
+        },
+    shopid: thread.shopid,
+    productid: thread.productid,
+    lastmessage: thread.lastmessage || "",
+    lastmessagedat: thread.lastmessagedat,
+    unreadforbuyer: Number(thread.unreadforbuyer || 0),
+    unreadforseller: Number(thread.unreadforseller || 0),
+    blockedbybuyer: Boolean(thread.blockedbybuyer),
+    blockedbyseller: Boolean(thread.blockedbyseller),
+    pinnedbybuyer: Boolean(thread.pinnedbybuyer),
+    pinnedbyseller: Boolean(thread.pinnedbyseller),
+    pinnedatbuyer: thread.pinnedatbuyer || null,
+    pinnedatseller: thread.pinnedatseller || null,
+    pinned: isSeller ? Boolean(thread.pinnedbyseller) : Boolean(thread.pinnedbybuyer),
+    pinnedat: isSeller ? thread.pinnedatseller || null : thread.pinnedatbuyer || null,
+    mutedbybuyer: Boolean(thread.mutedbybuyer),
+    mutedbyseller: Boolean(thread.mutedbyseller),
+    mutedatbuyer: thread.mutedatbuyer || null,
+    mutedatseller: thread.mutedatseller || null,
+    muted: isSeller ? Boolean(thread.mutedbyseller) : Boolean(thread.mutedbybuyer),
+    mutedat: isSeller ? thread.mutedatseller || null : thread.mutedatbuyer || null,
+    archivedbybuyer: Boolean(thread.archivedbybuyer),
+    archivedbyseller: Boolean(thread.archivedbyseller),
+    archivedatbuyer: thread.archivedatbuyer || null,
+    archivedatseller: thread.archivedatseller || null,
+    archived: isSeller ? Boolean(thread.archivedbyseller) : Boolean(thread.archivedbybuyer),
+    archivedat: isSeller ? thread.archivedatseller || null : thread.archivedatbuyer || null,
+    blockreasonbuyer: thread.blockreasonbuyer || "",
+    blockreasonseller: thread.blockreasonseller || "",
+    counterpartonline: Boolean(counterpartPresence.online),
+    counterpartlastseenat: counterpartPresence.lastseenat || null,
+    messages: (thread.messages || []).map((message) => ({
+      _id: message._id,
+      senderid: message.senderid,
+      senderkind: message.senderkind,
+      senderguestsessionid: message.senderguestsessionid,
+      senderguestname: message.senderguestname,
+      senderrole: message.senderrole,
+      text: resolveMessageText(message),
+      media: message.isdeleted ? [] : message.media,
+      replytoid: message.replytoid || null,
+      replypreview: message.replypreview || "",
+      forwardedfromid: message.forwardedfromid || null,
+      forwardedpreview: message.forwardedpreview || "",
+      readbybuyer: Boolean(message.readbybuyer),
+      readbybuyerat: message.readbybuyerat || null,
+      readbyseller: Boolean(message.readbyseller),
+      readbysellerat: message.readbysellerat || null,
+      isdeleted: Boolean(message.isdeleted),
+      deletedby: message.deletedby || "",
+      deletedat: message.deletedat,
+      createdat: message.createdat,
+    })),
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+  };
+};
 
 const markReadForSide = (thread, side) => {
+  const now = new Date();
   if (side === "seller") {
     thread.unreadforseller = 0;
     thread.messages = (thread.messages || []).map((message) => {
       if (message.senderrole === "Seller") return message;
       const next = message.toObject();
       next.readbyseller = true;
+      next.readbysellerat = next.readbysellerat || now;
       return next;
     });
   } else {
@@ -251,6 +374,7 @@ const markReadForSide = (thread, side) => {
       if (message.senderrole === "Buyer") return message;
       const next = message.toObject();
       next.readbybuyer = true;
+      next.readbybuyerat = next.readbybuyerat || now;
       return next;
     });
   }
@@ -328,16 +452,22 @@ exports.startSellerChat = async (req, res) => {
         return res.status(423).json({ success: false, message: "Chat is blocked. Unblock to send message." });
       }
 
+      const encrypted = encryptChatText(messageText);
       thread.messages.push({
         senderid: actor.userId,
         senderkind: actor.type,
         senderguestsessionid: actor.guestSessionId,
         senderguestname: actor.guestName,
         senderrole: "Buyer",
-        text: messageText,
+        text: encrypted.cipher ? "" : messageText,
+        textenc: encrypted.cipher || "",
+        textiv: encrypted.iv || "",
+        texttag: encrypted.tag || "",
         media: [],
         readbybuyer: true,
+        readbybuyerat: new Date(),
         readbyseller: false,
+        readbysellerat: null,
       });
       thread.lastmessage = messageText;
       thread.lastmessagedat = new Date();
@@ -350,6 +480,26 @@ exports.startSellerChat = async (req, res) => {
         senderrole: "Buyer",
         text: messageText,
       });
+
+      if (thread.sellerid) {
+        await SellerNotification.create({
+          sellerid: thread.sellerid,
+          shopid: thread.shopid,
+          type: "Info",
+          title: "New KhanChat message",
+          message: "A customer sent a new message.",
+          metadata: { source: "khanchat", threadid: String(thread._id) },
+        });
+        await pushKhanNotification({
+          recipientkind: "seller",
+          recipientid: thread.sellerid,
+          type: "Info",
+          channel: "khanchat",
+          title: "New KhanChat message",
+          message: "A customer started a conversation.",
+          metadata: { threadid: String(thread._id), shopid: String(thread.shopid || "") },
+        });
+      }
     }
 
     const populated = await SellerChatThread.findById(thread._id)
@@ -362,7 +512,7 @@ exports.startSellerChat = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Chat ready.",
-      thread: serializeThreadDetail(populated),
+      thread: serializeThreadDetail(populated, actor),
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: error?.message || "Failed to start chat." });
@@ -375,6 +525,16 @@ exports.getMyChatThreads = async (req, res) => {
     if (!actor) return;
 
     const baseFilter = actor.type === "guest" ? { guestsessionid: actor.guestSessionId } : actor.role === "Seller" ? { sellerid: actor.userId } : { buyerid: actor.userId };
+    const payload = sanitize(req.query || {});
+    const q = normalizeText(payload.q);
+    const archived = normalizeText(payload.archived).toLowerCase();
+    const includeArchived = archived === "all";
+    const wantsArchivedOnly = archived === "true";
+
+    if (!includeArchived) {
+      if (actor.role === "Seller") baseFilter.archivedbyseller = wantsArchivedOnly;
+      else baseFilter.archivedbybuyer = wantsArchivedOnly;
+    }
 
     const threads = await SellerChatThread.find({ ...baseFilter, isactive: true })
       .sort({ lastmessagedat: -1, updatedAt: -1 })
@@ -385,10 +545,22 @@ exports.getMyChatThreads = async (req, res) => {
       .populate("productid", "_id name slug whiteimage")
       .lean();
 
+    let mapped = threads.map((thread) => serializeThreadList(thread, actor));
+    if (q) {
+      const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(safe, "i");
+      mapped = mapped.filter((thread) =>
+        regex.test(thread?.counterpart?.fullname || "") ||
+        regex.test(thread?.shop?.shopname || "") ||
+        regex.test(thread?.lastmessage || "") ||
+        regex.test(thread?.product?.name || "")
+      );
+    }
+
     return res.status(200).json({
       success: true,
-      count: threads.length,
-      threads: threads.map((thread) => serializeThreadList(thread, actor)),
+      count: mapped.length,
+      threads: mapped,
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: error?.message || "Failed to fetch chats." });
@@ -419,7 +591,7 @@ exports.getChatThread = async (req, res) => {
       return res.status(403).json({ success: false, message: "Forbidden." });
     }
 
-    return res.status(200).json({ success: true, thread: serializeThreadDetail(thread) });
+    return res.status(200).json({ success: true, thread: serializeThreadDetail(thread, actor) });
   } catch (error) {
     return res.status(500).json({ success: false, message: error?.message || "Failed to load chat thread." });
   }
@@ -437,9 +609,11 @@ exports.sendChatMessage = async (req, res) => {
 
     const payload = sanitize(req.body || {});
     const text = normalizeText(payload.text);
+    const replyToId = normalizeText(payload.replytoid);
+    const forwardMessageId = normalizeText(payload.forwardmessageid);
     const media = await uploadMediaFromFiles(req.files || []);
 
-    if (!text && media.length === 0) {
+    if (!text && media.length === 0 && !mongoose.Types.ObjectId.isValid(forwardMessageId)) {
       return res.status(400).json({ success: false, message: "Message text, image, or video is required." });
     }
 
@@ -455,6 +629,28 @@ exports.sendChatMessage = async (req, res) => {
       return res.status(423).json({ success: false, message: "Chat is blocked. Unblock to continue." });
     }
 
+    let replyPreview = "";
+    let forwardedPreview = "";
+    let resolvedReplyId = null;
+    let resolvedForwardedId = null;
+
+    if (mongoose.Types.ObjectId.isValid(replyToId)) {
+      const replied = (thread.messages || []).find((entry) => String(entry._id) === String(replyToId));
+      if (replied) {
+        resolvedReplyId = replied._id;
+        replyPreview = resolveMessageText(replied).slice(0, 280);
+      }
+    }
+
+    if (mongoose.Types.ObjectId.isValid(forwardMessageId)) {
+      const fwd = (thread.messages || []).find((entry) => String(entry._id) === String(forwardMessageId));
+      if (fwd) {
+        resolvedForwardedId = fwd._id;
+        forwardedPreview = resolveMessageText(fwd).slice(0, 280);
+      }
+    }
+
+    const encrypted = encryptChatText(text);
     const senderSide = permission.side;
     const senderRole = senderSide === "seller" ? "Seller" : "Buyer";
 
@@ -464,13 +660,22 @@ exports.sendChatMessage = async (req, res) => {
       senderguestsessionid: actor.guestSessionId,
       senderguestname: actor.guestName,
       senderrole: senderRole,
-      text,
+      text: encrypted.cipher ? "" : text,
+      textenc: encrypted.cipher || "",
+      textiv: encrypted.iv || "",
+      texttag: encrypted.tag || "",
+      replytoid: resolvedReplyId,
+      replypreview: replyPreview,
+      forwardedfromid: resolvedForwardedId,
+      forwardedpreview: forwardedPreview,
       media,
       readbybuyer: senderRole === "Buyer",
+      readbybuyerat: senderRole === "Buyer" ? new Date() : null,
       readbyseller: senderRole === "Seller",
+      readbysellerat: senderRole === "Seller" ? new Date() : null,
     });
 
-    thread.lastmessage = text || (media[0]?.type === "video" ? "Sent a video" : "Sent an image");
+    thread.lastmessage = text || forwardedPreview || (media[0]?.type === "video" ? "Sent a video" : "Sent an image");
     thread.lastmessagedat = new Date();
 
     if (senderRole === "Seller") {
@@ -492,11 +697,47 @@ exports.sendChatMessage = async (req, res) => {
         senderrole: latest.senderrole,
         senderkind: latest.senderkind,
         senderguestname: latest.senderguestname,
-        text: latest.text,
+        text: resolveMessageText(latest),
         media: latest.media,
+        replytoid: latest.replytoid || null,
+        replypreview: latest.replypreview || "",
+        forwardedfromid: latest.forwardedfromid || null,
+        forwardedpreview: latest.forwardedpreview || "",
         createdat: latest.createdat,
       },
     });
+
+    if (senderRole === "Buyer" && thread.sellerid) {
+      await SellerNotification.create({
+        sellerid: thread.sellerid,
+        shopid: thread.shopid,
+        type: "Info",
+        title: "New KhanChat message",
+        message: "A customer sent a new message.",
+        metadata: { source: "khanchat", threadid: String(thread._id) },
+      });
+      await pushKhanNotification({
+        recipientkind: "seller",
+        recipientid: thread.sellerid,
+        type: "Info",
+        channel: "khanchat",
+        title: "New KhanChat message",
+        message: "A customer sent you a new message.",
+        metadata: { threadid: String(thread._id), shopid: String(thread.shopid || "") },
+      });
+    }
+
+    if (senderRole === "Seller" && thread.buyerid) {
+      await pushKhanNotification({
+        recipientkind: actorToNotificationKind("User"),
+        recipientid: thread.buyerid,
+        type: "Info",
+        channel: "khanchat",
+        title: "New reply from seller",
+        message: "You received a new message from seller.",
+        metadata: { threadid: String(thread._id), shopid: String(thread.shopid || "") },
+      });
+    }
 
     return res.status(201).json({ success: true, message: "Message sent.", chatmessage: latest });
   } catch (error) {
@@ -535,6 +776,13 @@ exports.deleteChatMessage = async (req, res) => {
 
     target.isdeleted = true;
     target.text = "";
+    target.textenc = "";
+    target.textiv = "";
+    target.texttag = "";
+    target.replytoid = null;
+    target.replypreview = "";
+    target.forwardedfromid = null;
+    target.forwardedpreview = "";
     target.media = [];
     target.deletedat = new Date();
     target.deletedby = actor.role === "SuperAdmin" ? "admin" : permission.side;
@@ -631,6 +879,160 @@ exports.toggleThreadBlock = async (req, res) => {
   }
 };
 
+exports.toggleThreadPin = async (req, res) => {
+  try {
+    const actor = await ensureActor(req, res, { allowGuest: true });
+    if (!actor) return;
+
+    const id = normalizeText(req.params.threadid);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid thread id." });
+    }
+
+    const payload = sanitize(req.body || {});
+    const pin = Boolean(payload.pin);
+
+    const thread = await SellerChatThread.findById(id);
+    if (!thread || !thread.isactive) return res.status(404).json({ success: false, message: "Thread not found." });
+
+    const permission = canActorAccessThread(thread, actor);
+    if (!permission.allowed) return res.status(403).json({ success: false, message: "Forbidden." });
+
+    const now = pin ? new Date() : null;
+    if (permission.side === "seller") {
+      thread.pinnedbyseller = pin;
+      thread.pinnedatseller = now;
+    } else {
+      thread.pinnedbybuyer = pin;
+      thread.pinnedatbuyer = now;
+    }
+
+    await thread.save();
+
+    emitChatEvent(String(thread._id), "chat_pin_update", {
+      threadid: String(thread._id),
+      side: permission.side,
+      pin,
+      pinnedat: now,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: pin ? "Conversation pinned." : "Conversation unpinned.",
+      pin,
+      pinnedat: now,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to update pin state." });
+  }
+};
+
+exports.toggleThreadMute = async (req, res) => {
+  try {
+    const actor = await ensureActor(req, res, { allowGuest: true });
+    if (!actor) return;
+    const id = normalizeText(req.params.threadid);
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid thread id." });
+
+    const payload = sanitize(req.body || {});
+    const mute = toBool(payload.mute);
+
+    const thread = await SellerChatThread.findById(id);
+    if (!thread || !thread.isactive) return res.status(404).json({ success: false, message: "Thread not found." });
+    const permission = canActorAccessThread(thread, actor);
+    if (!permission.allowed) return res.status(403).json({ success: false, message: "Forbidden." });
+
+    const now = mute ? new Date() : null;
+    if (permission.side === "seller") {
+      thread.mutedbyseller = mute;
+      thread.mutedatseller = now;
+    } else {
+      thread.mutedbybuyer = mute;
+      thread.mutedatbuyer = now;
+    }
+
+    await thread.save();
+    emitChatEvent(String(thread._id), "chat_mute_update", { threadid: String(thread._id), side: permission.side, mute, mutedat: now });
+    return res.status(200).json({ success: true, message: mute ? "Conversation muted." : "Conversation unmuted.", mute, mutedat: now });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to update mute state." });
+  }
+};
+
+exports.toggleThreadArchive = async (req, res) => {
+  try {
+    const actor = await ensureActor(req, res, { allowGuest: true });
+    if (!actor) return;
+    const id = normalizeText(req.params.threadid);
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid thread id." });
+
+    const payload = sanitize(req.body || {});
+    const archive = toBool(payload.archive);
+
+    const thread = await SellerChatThread.findById(id);
+    if (!thread || !thread.isactive) return res.status(404).json({ success: false, message: "Thread not found." });
+    const permission = canActorAccessThread(thread, actor);
+    if (!permission.allowed) return res.status(403).json({ success: false, message: "Forbidden." });
+
+    const now = archive ? new Date() : null;
+    if (permission.side === "seller") {
+      thread.archivedbyseller = archive;
+      thread.archivedatseller = now;
+    } else {
+      thread.archivedbybuyer = archive;
+      thread.archivedatbuyer = now;
+    }
+
+    await thread.save();
+    emitChatEvent(String(thread._id), "chat_archive_update", { threadid: String(thread._id), side: permission.side, archive, archivedat: now });
+    return res.status(200).json({ success: true, message: archive ? "Conversation archived." : "Conversation restored.", archive, archivedat: now });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to update archive state." });
+  }
+};
+
+exports.searchChatMessages = async (req, res) => {
+  try {
+    const actor = await ensureActor(req, res, { allowGuest: true });
+    if (!actor) return;
+    const query = sanitize(req.query || {});
+    const q = normalizeText(query.q);
+    if (!q) return res.status(200).json({ success: true, count: 0, rows: [] });
+
+    const baseFilter = actor.type === "guest" ? { guestsessionid: actor.guestSessionId } : actor.role === "Seller" ? { sellerid: actor.userId } : { buyerid: actor.userId };
+    const threads = await SellerChatThread.find({ ...baseFilter, isactive: true })
+      .select("_id shopid productid sellerid buyerid guestsessionid guestname messages")
+      .populate("shopid", "_id shopname slug profileimage")
+      .populate("productid", "_id name slug whiteimage")
+      .lean();
+
+    const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(safe, "i");
+    const rows = [];
+
+    (threads || []).forEach((thread) => {
+      (thread.messages || []).forEach((message) => {
+        const text = resolveMessageText(message);
+        if (!text || !regex.test(text)) return;
+        rows.push({
+          threadid: thread._id,
+          messageid: message._id,
+          text,
+          createdat: message.createdat,
+          senderrole: message.senderrole,
+          shop: thread.shopid ? { _id: thread.shopid._id, shopname: thread.shopid.shopname, slug: thread.shopid.slug } : null,
+          product: thread.productid ? { _id: thread.productid._id, name: thread.productid.name, slug: thread.productid.slug } : null,
+        });
+      });
+    });
+
+    rows.sort((a, b) => new Date(b.createdat).getTime() - new Date(a.createdat).getTime());
+    return res.status(200).json({ success: true, count: rows.length, rows: rows.slice(0, 200) });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to search messages." });
+  }
+};
+
 exports.createSellerReport = async (req, res) => {
   try {
     const actor = await ensureActor(req, res, { allowGuest: true });
@@ -671,6 +1073,21 @@ exports.createSellerReport = async (req, res) => {
       evidence,
       status: "Pending",
     });
+
+    const superAdmins = await User.find({ role: "SuperAdmin" }).select("_id").lean();
+    await Promise.all(
+      (superAdmins || []).map((admin) =>
+        pushKhanNotification({
+          recipientkind: "superadmin",
+          recipientid: admin._id,
+          type: "Warning",
+          channel: "moderation",
+          title: "New KhanChat report",
+          message: `A new seller report was submitted by ${actor.type === "user" ? actor.user?.fullname || "Customer" : actor.guestName}.`,
+          metadata: { reportid: String(report._id), threadid: String(thread._id), sellerid: String(thread.sellerid || "") },
+        })
+      )
+    );
 
     return res.status(201).json({ success: true, message: "Report submitted to superadmin.", reportid: report._id });
   } catch (error) {
@@ -756,6 +1173,30 @@ exports.decideChatReport = async (req, res) => {
     }
 
     await report.save();
+
+    if (report.sellerid) {
+      await pushKhanNotification({
+        recipientkind: "seller",
+        recipientid: report.sellerid,
+        type: decision === "ActionTaken" ? "Warning" : "Info",
+        channel: "moderation",
+        title: `KhanChat report ${decision}`,
+        message: decision === "ActionTaken" ? "A report against your chat was accepted by SuperAdmin." : `A report against your chat was marked ${decision}.`,
+        metadata: { reportid: String(report._id), decision, healthdeduction },
+      });
+    }
+
+    if (report.reporterid) {
+      await pushKhanNotification({
+        recipientkind: "user",
+        recipientid: report.reporterid,
+        type: "Info",
+        channel: "moderation",
+        title: "Your KhanChat report was reviewed",
+        message: `SuperAdmin marked your report as ${decision}.`,
+        metadata: { reportid: String(report._id), decision },
+      });
+    }
 
     return res.status(200).json({ success: true, message: `Report marked as ${decision}.`, report });
   } catch (error) {

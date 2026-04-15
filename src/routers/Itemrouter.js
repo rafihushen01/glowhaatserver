@@ -25,6 +25,10 @@ const {
   shopbycategory,
   getcategoryfilters,
   filtercategoryproduct,
+  getDiscoveryBestSellers,
+  getDiscoveryTopRated,
+  getDiscoveryNewIn,
+  getDiscoveryCms,
 } = require("../controllers/Itemcontroller");
 
 
@@ -86,4 +90,8 @@ router.get("/category/:slug", shopbycategory);
 
 router.get("/category/filters/:slug", getcategoryfilters)
 router.post("/category/filter/:slug", filtercategoryproduct);
+router.get("/discovery/cms", getDiscoveryCms);
+router.get("/discovery/best-sellers", getDiscoveryBestSellers);
+router.get("/discovery/top-rated", getDiscoveryTopRated);
+router.get("/discovery/new-in", getDiscoveryNewIn);
 module.exports = router;

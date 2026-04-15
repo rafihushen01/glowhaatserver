@@ -6,6 +6,7 @@ const gentoken = require("../utils/Token")
 const crypto = require("crypto")
 const SuperAdminOtp = require("../models/SuperAdminOtp")
 const { verifyFirebaseIdToken } = require("../utils/FirebaseAdmin")
+const { pushKhanNotification } = require("../utils/KhanNotifier")
 
 const generateSecureStudentId = () => {
   return crypto.randomBytes(6).toString("hex")
@@ -97,6 +98,13 @@ const buildCookieOptions = () => {
 const signInWithUserCookie = (res, userId) => {
   const token = gentoken(userId)
   res.cookie("token", token, buildCookieOptions())
+}
+
+const notificationKindForRole = (role = "") => {
+  const normalized = String(role || "").trim().toLowerCase()
+  if (normalized === "seller") return "seller"
+  if (normalized === "superadmin") return "superadmin"
+  return "user"
 }
 
 const ensureSuperAdminUser = async () => {
@@ -191,6 +199,16 @@ avatar
 
 signInWithUserCookie(res,newuser._id)
 
+await pushKhanNotification({
+recipientkind: notificationKindForRole(newuser.role),
+recipientid: newuser._id,
+type: "Success",
+channel: "auth",
+title: "Welcome to KhanCosmetics",
+message: "Your account is ready. Start exploring and shopping now.",
+metadata: { event: "signup" }
+})
+
 return res.status(201).json({
 success:true,
 message:"Signup successful",
@@ -260,6 +278,16 @@ return res.status(400).json({message:"Invalid credentials"})
 
 signInWithUserCookie(res, existing._id)
 
+await pushKhanNotification({
+recipientkind: notificationKindForRole(existing.role),
+recipientid: existing._id,
+type: "Info",
+channel: "auth",
+title: "Signed in successfully",
+message: "Your account was signed in successfully.",
+metadata: { event: "signin" }
+})
+
 return res.status(200).json({
 success:true,
 message:"Signin successful",
@@ -305,6 +333,16 @@ exports.superadminsignin = async (req, res) => {
 
     const existing = await ensureSuperAdminUser()
     signInWithUserCookie(res, existing._id)
+
+    await pushKhanNotification({
+      recipientkind: "superadmin",
+      recipientid: existing._id,
+      type: "Info",
+      channel: "auth",
+      title: "SuperAdmin signed in",
+      message: "SuperAdmin session has started successfully.",
+      metadata: { event: "superadmin_signin" },
+    })
 
     return res.status(200).json({
       success: true,

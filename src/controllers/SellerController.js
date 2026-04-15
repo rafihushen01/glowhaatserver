@@ -6,6 +6,7 @@ const bcrypt = require("bcryptjs");
 const SellerRequest = require("../models/SellerRequest");
 const User = require("../models/User");
 const uploadoncloudinary = require("../utils/Cloudinary");
+const { pushKhanNotification } = require("../utils/KhanNotifier");
 
 const normalizeEmail = (value = "") => String(value).trim().toLowerCase();
 const normalizeText = (value = "") => String(value).trim();
@@ -508,6 +509,28 @@ exports.decideSellerRequest = async (req, res) => {
     }
 
     await existing.save();
+
+    if (existing.userid) {
+      await pushKhanNotification({
+        recipientkind: decision === "Approved" ? "seller" : "user",
+        recipientid: existing.userid,
+        type: decision === "Approved" ? "Success" : "Warning",
+        channel: "seller",
+        title: `Seller request ${decision}`,
+        message: decision === "Approved" ? "Congratulations, your seller request is approved." : `Your seller request was rejected. ${rejectreason || ""}`,
+        metadata: { requestid: String(existing._id), decision },
+      });
+    }
+
+    await pushKhanNotification({
+      recipientkind: "superadmin",
+      recipientid: me._id,
+      type: "Info",
+      channel: "seller",
+      title: "Seller request decision saved",
+      message: `Seller request ${String(existing._id)} marked as ${decision}.`,
+      metadata: { requestid: String(existing._id), decision },
+    });
 
     return res.status(200).json({
       success: true,
