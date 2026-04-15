@@ -462,12 +462,31 @@ exports.decideSellerRequest = async (req, res) => {
           .json({ message: "Seller password missing in this request. Ask applicant to resubmit." });
       }
 
+      const emailOwner = await User.findOne({ email: sellerLoginEmail }).select("_id email").lean();
+      if (emailOwner && linkedUser && String(emailOwner._id) !== String(linkedUser._id)) {
+        return res.status(409).json({
+          message:
+            "Seller login email is already used by another account. Use a different seller login email.",
+        });
+      }
+
       if (!linkedUser) {
+        const mobile = normalizeMobile(existing.mobile || "");
+        if (mobile) {
+          const mobileOwner = await User.findOne({ mobile }).select("_id mobile").lean();
+          if (mobileOwner) {
+            return res.status(409).json({
+              message:
+                "Mobile number is already used by another account. Please update applicant mobile and retry.",
+            });
+          }
+        }
+
         linkedUser = await User.create({
           fullname: existing.fullname || "Seller",
           email: sellerLoginEmail,
           password: existing.sellerpasswordhash,
-          mobile: existing.mobile || undefined,
+          mobile: mobile || undefined,
           gender: "Other",
           role: "Seller",
           issellerverified: true,
@@ -494,7 +513,14 @@ exports.decideSellerRequest = async (req, res) => {
       success: true,
       message: `Seller request ${decision.toLowerCase()}.`,
     });
-  } catch (_error) {
-    return res.status(500).json({ message: "Failed to update seller request." });
+  } catch (error) {
+    console.error("decideSellerRequest error:", error);
+    if (error?.code === 11000) {
+      const fields = Object.keys(error?.keyPattern || error?.keyValue || {});
+      return res.status(409).json({
+        message: `Duplicate value found for ${fields.join(", ") || "unique field"}.`,
+      });
+    }
+    return res.status(500).json({ message: error?.message || "Failed to update seller request." });
   }
 };
