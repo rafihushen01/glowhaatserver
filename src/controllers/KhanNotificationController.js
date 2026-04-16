@@ -2,6 +2,7 @@ const sanitize = require("mongo-sanitize");
 const mongoose = require("mongoose");
 const User = require("../models/User");
 const KhanNotification = require("../models/KhanNotification");
+const { pushKhanNotification } = require("../utils/KhanNotifier");
 
 const normalizeText = (value = "") => String(value || "").trim();
 const toNumber = (value, fallback) => {
@@ -29,6 +30,16 @@ const ensureAuthUser = async (req, res) => {
     return null;
   }
 
+  return me;
+};
+
+const ensureSuperAdmin = async (req, res) => {
+  const me = await ensureAuthUser(req, res);
+  if (!me) return null;
+  if (me.role !== "SuperAdmin") {
+    res.status(403).json({ success: false, message: "Forbidden" });
+    return null;
+  }
   return me;
 };
 
@@ -114,3 +125,94 @@ exports.markAllMyKhanNotificationsRead = async (req, res) => {
   }
 };
 
+const toRoleFromKind = (kind = "") => {
+  const normalized = normalizeText(kind).toLowerCase();
+  if (normalized === "seller") return "Seller";
+  if (normalized === "superadmin") return "SuperAdmin";
+  return "User";
+};
+
+exports.sendSuperAdminNotice = async (req, res) => {
+  try {
+    const admin = await ensureSuperAdmin(req, res);
+    if (!admin) return;
+
+    const payload = sanitize(req.body || {});
+    const targetkind = normalizeText(payload.targetkind || "all").toLowerCase();
+    const targetid = normalizeText(payload.targetid);
+    const title = normalizeText(payload.title).slice(0, 240);
+    const message = normalizeText(payload.message).slice(0, 4000);
+    const type = normalizeText(payload.type) || "Info";
+    const channel = normalizeText(payload.channel || "notice") || "notice";
+
+    if (!title || !message) {
+      return res.status(400).json({ success: false, message: "Title and message are required." });
+    }
+
+    if (targetid) {
+      if (!mongoose.Types.ObjectId.isValid(targetid)) {
+        return res.status(400).json({ success: false, message: "Invalid target user id." });
+      }
+
+      const targetUser = await User.findById(targetid).select("_id role fullname").lean();
+      if (!targetUser) return res.status(404).json({ success: false, message: "Target user not found." });
+
+      const recipientkind = resolveRecipientKind(targetUser.role);
+      await pushKhanNotification({
+        recipientkind,
+        recipientid: targetUser._id,
+        type,
+        channel,
+        title,
+        message,
+        metadata: {
+          source: "superadmin_notice",
+          sentby: String(admin._id),
+          sentbyname: admin.fullname || "SuperAdmin",
+        },
+      });
+
+      return res.status(200).json({ success: true, sent: 1, targetkind: recipientkind });
+    }
+
+    const allowedKinds = new Set(["all", "user", "seller", "superadmin"]);
+    if (!allowedKinds.has(targetkind)) {
+      return res.status(400).json({ success: false, message: "Invalid target kind." });
+    }
+
+    const roleFilter =
+      targetkind === "all" ? {} : { role: toRoleFromKind(targetkind) };
+    const users = await User.find(roleFilter).select("_id role").lean();
+
+    let sent = 0;
+    for (const entry of users) {
+      try {
+        await pushKhanNotification({
+          recipientkind: resolveRecipientKind(entry.role),
+          recipientid: entry._id,
+          type,
+          channel,
+          title,
+          message,
+          metadata: {
+            source: "superadmin_notice",
+            sentby: String(admin._id),
+            sentbyname: admin.fullname || "SuperAdmin",
+          },
+        });
+        sent += 1;
+      } catch (_error) {
+        // Continue dispatching remaining notifications
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Notification broadcast completed.",
+      sent,
+      targetkind,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to send notice." });
+  }
+};

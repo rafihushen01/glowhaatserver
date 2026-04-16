@@ -100,6 +100,15 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
     statushistory: { type: [statusHistorySchema], default: [] },
+    stocksettledat: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    stockrollbackat: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );

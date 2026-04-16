@@ -22,6 +22,34 @@ const sellershopSchema = new mongoose.Schema(
     freezereason: { type: String, default: "", trim: true },
     blockedat: { type: Date, default: null },
     createdbyadminid: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    badgeids: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "SellerBadge" }],
+      default: [],
+      index: true,
+    },
+    storelayout: {
+      sections: {
+        type: [String],
+        default: ["hero", "featured", "top-selling", "new-in"],
+      },
+      featuredproductids: {
+        type: [{ type: mongoose.Schema.Types.ObjectId, ref: "item" }],
+        default: [],
+      },
+      accent: {
+        type: String,
+        default: "#1f5c49",
+      },
+      updatedby: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      updatedat: {
+        type: Date,
+        default: null,
+      },
+    },
   },
   { timestamps: true }
 );
