@@ -1203,3 +1203,356 @@ exports.decideChatReport = async (req, res) => {
     return res.status(500).json({ success: false, message: error?.message || "Failed to decide report." });
   }
 };
+
+const matchesSafeRegex = (haystack = "", needle = "") => {
+  const query = normalizeText(needle);
+  if (!query) return true;
+  const safe = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(safe, "i");
+  return regex.test(normalizeText(haystack));
+};
+
+const buildAdminThreadSnapshot = (thread) => ({
+  _id: thread._id,
+  conversationid: thread._id,
+  shop: thread.shopid
+    ? {
+        _id: thread.shopid._id,
+        shopname: thread.shopid.shopname,
+        slug: thread.shopid.slug,
+        profileimage: thread.shopid.profileimage || "",
+      }
+    : null,
+  product: thread.productid
+    ? {
+        _id: thread.productid._id,
+        name: thread.productid.name,
+        slug: thread.productid.slug,
+        whiteimage: thread.productid.whiteimage || "",
+      }
+    : null,
+  buyer: {
+    _id: thread.buyerid?._id || null,
+    fullname: thread.buyerid?.fullname || thread.guestname || "Guest",
+    usersavatar: thread.buyerid?.usersavatar || "",
+    role: thread.buyerid?.role || "Guest",
+    isguest: !thread.buyerid?._id,
+    guestsessionid: thread.guestsessionid || "",
+  },
+  seller: {
+    _id: thread.sellerid?._id || null,
+    fullname: thread.sellerid?.fullname || "Seller",
+    usersavatar: thread.sellerid?.usersavatar || "",
+    role: thread.sellerid?.role || "Seller",
+  },
+  lastmessage: thread.lastmessage || "",
+  lastmessagedat: thread.lastmessagedat || null,
+  unreadforbuyer: Number(thread.unreadforbuyer || 0),
+  unreadforseller: Number(thread.unreadforseller || 0),
+  blockedbybuyer: Boolean(thread.blockedbybuyer),
+  blockedbyseller: Boolean(thread.blockedbyseller),
+  isactive: Boolean(thread.isactive),
+  messagecount: Array.isArray(thread.messages) ? thread.messages.length : 0,
+  createdAt: thread.createdAt,
+  updatedAt: thread.updatedAt,
+});
+
+const buildAdminThreadDetail = (thread) => ({
+  ...buildAdminThreadSnapshot(thread),
+  messages: (thread.messages || []).map((message) => ({
+    _id: message._id,
+    senderid: message.senderid || null,
+    senderkind: message.senderkind || "",
+    senderguestsessionid: message.senderguestsessionid || "",
+    senderguestname: message.senderguestname || "",
+    senderrole: message.senderrole || "",
+    text: resolveMessageText(message),
+    media: message.isdeleted ? [] : message.media || [],
+    replytoid: message.replytoid || null,
+    replypreview: message.replypreview || "",
+    forwardedfromid: message.forwardedfromid || null,
+    forwardedpreview: message.forwardedpreview || "",
+    readbybuyer: Boolean(message.readbybuyer),
+    readbybuyerat: message.readbybuyerat || null,
+    readbyseller: Boolean(message.readbyseller),
+    readbysellerat: message.readbysellerat || null,
+    isdeleted: Boolean(message.isdeleted),
+    deletedby: message.deletedby || "",
+    deletedat: message.deletedat || null,
+    createdat: message.createdat || null,
+  })),
+});
+
+const recomputeThreadLastMessage = (thread) => {
+  const messages = Array.isArray(thread.messages) ? [...thread.messages] : [];
+  const latest = [...messages].reverse().find((entry) => !entry?.isdeleted);
+  if (!latest) {
+    thread.lastmessage = "";
+    return;
+  }
+  thread.lastmessage = resolveMessageText(latest).slice(0, 2000);
+  thread.lastmessagedat = latest.createdat || thread.lastmessagedat || new Date();
+};
+
+exports.getAdminChatThreads = async (req, res) => {
+  try {
+    const admin = await ensureSuperAdmin(req, res);
+    if (!admin) return;
+
+    const query = sanitize(req.query || {});
+    const page = Math.max(1, toNumber(query.page, 1));
+    const limit = Math.max(1, Math.min(80, toNumber(query.limit, 20)));
+    const conversationid = normalizeText(query.conversationid || query.threadid);
+    const buyername = normalizeText(query.buyername || query.username);
+    const sellername = normalizeText(query.sellername);
+    const q = normalizeText(query.q);
+
+    const filter = { isactive: true };
+    if (conversationid && mongoose.Types.ObjectId.isValid(conversationid)) {
+      filter._id = new mongoose.Types.ObjectId(conversationid);
+    }
+
+    const threads = await SellerChatThread.find(filter)
+      .sort({ lastmessagedat: -1, updatedAt: -1 })
+      .populate("buyerid", "_id fullname usersavatar role")
+      .populate("sellerid", "_id fullname usersavatar role")
+      .populate("shopid", "_id shopname slug profileimage")
+      .populate("productid", "_id name slug whiteimage")
+      .lean();
+
+    const filtered = threads.filter((thread) => {
+      const buyerDisplay = thread?.buyerid?.fullname || thread?.guestname || "Guest";
+      const sellerDisplay = thread?.sellerid?.fullname || "";
+      if (buyername && !matchesSafeRegex(buyerDisplay, buyername)) return false;
+      if (sellername && !matchesSafeRegex(sellerDisplay, sellername)) return false;
+      if (!q) return true;
+      return (
+        matchesSafeRegex(buyerDisplay, q) ||
+        matchesSafeRegex(sellerDisplay, q) ||
+        matchesSafeRegex(thread?.shopid?.shopname || "", q) ||
+        matchesSafeRegex(thread?.productid?.name || "", q) ||
+        matchesSafeRegex(String(thread?._id || ""), q)
+      );
+    });
+
+    const count = filtered.length;
+    const pages = Math.max(1, Math.ceil(count / limit));
+    const start = (page - 1) * limit;
+    const rows = filtered.slice(start, start + limit).map(buildAdminThreadSnapshot);
+
+    return res.status(200).json({
+      success: true,
+      count,
+      page,
+      pages,
+      rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to load admin conversations." });
+  }
+};
+
+exports.getAdminChatThreadById = async (req, res) => {
+  try {
+    const admin = await ensureSuperAdmin(req, res);
+    if (!admin) return;
+
+    const threadId = normalizeText(req.params.threadid || req.params.id);
+    if (!mongoose.Types.ObjectId.isValid(threadId)) {
+      return res.status(400).json({ success: false, message: "Invalid conversation id." });
+    }
+
+    const thread = await SellerChatThread.findById(threadId)
+      .populate("buyerid", "_id fullname usersavatar role email")
+      .populate("sellerid", "_id fullname usersavatar role email")
+      .populate("shopid", "_id shopname slug profileimage")
+      .populate("productid", "_id name slug whiteimage");
+
+    if (!thread || !thread.isactive) {
+      return res.status(404).json({ success: false, message: "Conversation not found." });
+    }
+
+    return res.status(200).json({
+      success: true,
+      thread: buildAdminThreadDetail(thread),
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to load conversation detail." });
+  }
+};
+
+exports.adminEditChatMessage = async (req, res) => {
+  try {
+    const admin = await ensureSuperAdmin(req, res);
+    if (!admin) return;
+
+    const threadId = normalizeText(req.params.threadid);
+    const messageId = normalizeText(req.params.messageid);
+    if (!mongoose.Types.ObjectId.isValid(threadId) || !mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ success: false, message: "Invalid id." });
+    }
+
+    const payload = sanitize(req.body || {});
+    const nextText = normalizeText(payload.text).slice(0, 2000);
+    if (!nextText) return res.status(400).json({ success: false, message: "Message text is required." });
+
+    const thread = await SellerChatThread.findById(threadId);
+    if (!thread || !thread.isactive) return res.status(404).json({ success: false, message: "Conversation not found." });
+
+    const target = (thread.messages || []).find((entry) => String(entry._id) === String(messageId));
+    if (!target) return res.status(404).json({ success: false, message: "Message not found." });
+    if (target.isdeleted) {
+      return res.status(400).json({ success: false, message: "Deleted message cannot be edited." });
+    }
+
+    const encrypted = encryptChatText(nextText);
+    target.text = encrypted.cipher ? "" : nextText;
+    target.textenc = encrypted.cipher || "";
+    target.textiv = encrypted.iv || "";
+    target.texttag = encrypted.tag || "";
+
+    recomputeThreadLastMessage(thread);
+    await thread.save();
+
+    emitChatEvent(String(thread._id), "chat_message_edited", {
+      threadid: String(thread._id),
+      messageid: String(target._id),
+      text: nextText,
+      editedby: "admin",
+      editedbyid: String(admin._id),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Message updated by SuperAdmin.",
+      chatmessage: {
+        _id: target._id,
+        text: resolveMessageText(target),
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to edit message." });
+  }
+};
+
+exports.adminDeleteChatMessage = async (req, res) => {
+  try {
+    const admin = await ensureSuperAdmin(req, res);
+    if (!admin) return;
+
+    const threadId = normalizeText(req.params.threadid);
+    const messageId = normalizeText(req.params.messageid);
+    if (!mongoose.Types.ObjectId.isValid(threadId) || !mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ success: false, message: "Invalid id." });
+    }
+
+    const thread = await SellerChatThread.findById(threadId);
+    if (!thread || !thread.isactive) return res.status(404).json({ success: false, message: "Conversation not found." });
+
+    const target = (thread.messages || []).find((entry) => String(entry._id) === String(messageId));
+    if (!target) return res.status(404).json({ success: false, message: "Message not found." });
+
+    target.isdeleted = true;
+    target.text = "";
+    target.textenc = "";
+    target.textiv = "";
+    target.texttag = "";
+    target.replytoid = null;
+    target.replypreview = "";
+    target.forwardedfromid = null;
+    target.forwardedpreview = "";
+    target.media = [];
+    target.deletedat = new Date();
+    target.deletedby = "admin";
+
+    recomputeThreadLastMessage(thread);
+    await thread.save();
+
+    emitChatEvent(String(thread._id), "chat_message_deleted", {
+      threadid: String(thread._id),
+      messageid: String(target._id),
+      deletedby: "admin",
+      deletedbyid: String(admin._id),
+    });
+
+    return res.status(200).json({ success: true, message: "Message deleted by SuperAdmin." });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to delete message." });
+  }
+};
+
+exports.adminSendMessageToThread = async (req, res) => {
+  try {
+    const admin = await ensureSuperAdmin(req, res);
+    if (!admin) return;
+
+    const threadId = normalizeText(req.params.threadid);
+    if (!mongoose.Types.ObjectId.isValid(threadId)) {
+      return res.status(400).json({ success: false, message: "Invalid conversation id." });
+    }
+
+    const payload = sanitize(req.body || {});
+    const text = normalizeText(payload.text).slice(0, 2000);
+    const senderrole = normalizeText(payload.senderrole).toLowerCase() === "buyer" ? "Buyer" : "Seller";
+    if (!text) return res.status(400).json({ success: false, message: "Message text is required." });
+
+    const thread = await SellerChatThread.findById(threadId);
+    if (!thread || !thread.isactive) return res.status(404).json({ success: false, message: "Conversation not found." });
+
+    const encrypted = encryptChatText(text);
+    thread.messages.push({
+      senderid: admin._id,
+      senderkind: "user",
+      senderguestsessionid: "",
+      senderguestname: "",
+      senderrole,
+      text: encrypted.cipher ? "" : text,
+      textenc: encrypted.cipher || "",
+      textiv: encrypted.iv || "",
+      texttag: encrypted.tag || "",
+      media: [],
+      readbybuyer: senderrole === "Buyer",
+      readbybuyerat: senderrole === "Buyer" ? new Date() : null,
+      readbyseller: senderrole === "Seller",
+      readbysellerat: senderrole === "Seller" ? new Date() : null,
+    });
+
+    thread.lastmessage = text;
+    thread.lastmessagedat = new Date();
+    if (senderrole === "Seller") {
+      thread.unreadforbuyer = Number(thread.unreadforbuyer || 0) + 1;
+    } else {
+      thread.unreadforseller = Number(thread.unreadforseller || 0) + 1;
+    }
+
+    await thread.save();
+    const latest = thread.messages[thread.messages.length - 1];
+
+    emitChatEvent(String(thread._id), "chat_message", {
+      threadid: String(thread._id),
+      message: {
+        _id: latest._id,
+        senderrole: latest.senderrole,
+        senderkind: latest.senderkind,
+        text,
+        media: latest.media,
+        createdat: latest.createdat,
+      },
+      sentby: "admin",
+      sentbyid: String(admin._id),
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Message sent by SuperAdmin.",
+      chatmessage: {
+        _id: latest._id,
+        text,
+        senderrole,
+        createdat: latest.createdat,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to send admin message." });
+  }
+};

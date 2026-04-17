@@ -216,3 +216,47 @@ exports.sendSuperAdminNotice = async (req, res) => {
     return res.status(500).json({ success: false, message: error?.message || "Failed to send notice." });
   }
 };
+
+exports.searchSuperAdminRecipients = async (req, res) => {
+  try {
+    const admin = await ensureSuperAdmin(req, res);
+    if (!admin) return;
+
+    const query = sanitize(req.query || {});
+    const q = normalizeText(query.q);
+    const role = normalizeText(query.role);
+    const limit = Math.min(120, toNumber(query.limit, 40));
+
+    const filter = {};
+    if (["User", "Seller", "Admin", "SuperAdmin"].includes(role)) {
+      filter.role = role;
+    }
+
+    if (q) {
+      const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(safe, "i");
+      filter.$or = [
+        { fullname: regex },
+        { email: regex },
+        { mobile: regex },
+      ];
+      if (mongoose.Types.ObjectId.isValid(q)) {
+        filter.$or.push({ _id: new mongoose.Types.ObjectId(q) });
+      }
+    }
+
+    const rows = await User.find(filter)
+      .select("_id fullname email mobile role usersavatar isblocked")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      count: rows.length,
+      rows,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to search recipients." });
+  }
+};

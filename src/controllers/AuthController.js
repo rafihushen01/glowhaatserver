@@ -4,9 +4,11 @@ const bcrypt = require("bcryptjs")
 const validator = require("validator")
 const gentoken = require("../utils/Token")
 const crypto = require("crypto")
+const path = require("path")
 const SuperAdminOtp = require("../models/SuperAdminOtp")
 const { verifyFirebaseIdToken } = require("../utils/FirebaseAdmin")
 const { pushKhanNotification } = require("../utils/KhanNotifier")
+const uploadoncloudinary = require("../utils/Cloudinary")
 
 const generateSecureStudentId = () => {
   return crypto.randomBytes(6).toString("hex")
@@ -582,6 +584,7 @@ return res.status(404).json({message:"User not found"})
 return res.status(200).json({
 success:true,
 user:{
+_id:existing._id,
 id:existing._id,
 fullname:existing.fullname||"",
 email:existing.email||"",
@@ -595,5 +598,80 @@ avatar:existing.usersavatar||existing.avatar||""
 }catch(err){
 return res.status(500).json({message:"Failed to fetch user"})
 }
+}
+
+exports.updatecurrentuserprofile = async (req, res) => {
+  try {
+    const userid = req.user?.userId
+    if (!userid) {
+      return res.status(401).json({ success: false, message: "Please sign in first to continue." })
+    }
+
+    const existing = await user.findById(userid)
+    if (!existing) return res.status(404).json({ success: false, message: "User not found" })
+
+    const payload = sanitize(req.body || {})
+    const fullname = String(payload.fullname || "").trim()
+    const mobile = normalizeMobile(payload.mobile || "")
+    const gender = String(payload.gender || "").trim()
+    const district = String(payload.district || payload.District || "").trim()
+    const city = String(payload.city || "").trim()
+    const upzilla = String(payload.upzilla || "").trim()
+    const fulladdress = String(payload.fulladdress || "").trim()
+
+    if (fullname) existing.fullname = fullname
+
+    if (mobile) {
+      if (!isValidMobile(mobile)) {
+        return res.status(400).json({ success: false, message: "Invalid mobile number format" })
+      }
+      const mobileOwner = await user.findOne({ mobile }).select("_id").lean()
+      if (mobileOwner && String(mobileOwner._id) !== String(existing._id)) {
+        return res.status(409).json({ success: false, message: "This mobile number is already in use." })
+      }
+      existing.mobile = mobile
+    }
+
+    if (["Male", "Female", "Other"].includes(gender)) {
+      existing.gender = gender
+    }
+
+    if (district) existing.District = district
+    if (city) existing.city = city
+    if (upzilla) existing.upzilla = upzilla
+    if (fulladdress) existing.fulladdress = fulladdress
+
+    if (req.file?.path) {
+      try {
+        const uploaded = await uploadoncloudinary(req.file.path)
+        if (uploaded) existing.usersavatar = uploaded
+      } catch (_error) {
+        existing.usersavatar = `/public/${path.basename(req.file.path)}`
+      }
+    }
+
+    await existing.save()
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user: {
+        _id: existing._id,
+        id: existing._id,
+        fullname: existing.fullname || "",
+        email: existing.email || "",
+        mobile: existing.mobile || "",
+        role: existing.role || "User",
+        gender: existing.gender || "",
+        district: existing.District || "",
+        city: existing.city || "",
+        upzilla: existing.upzilla || "",
+        fulladdress: existing.fulladdress || "",
+        avatar: existing.usersavatar || existing.avatar || "",
+      },
+    })
+  } catch (_error) {
+    return res.status(500).json({ success: false, message: "Failed to update profile" })
+  }
 }
 

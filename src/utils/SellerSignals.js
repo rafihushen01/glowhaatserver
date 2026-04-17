@@ -99,7 +99,7 @@ const buildProductCardBadges = ({
     badges.push({
       key: "free-delivery",
       label: "Free Delivery",
-      image: "/app/assets/freedeliverybadge.png",
+      image: "/badges/freedeliverybadge.png",
       tone: "emerald",
     });
   }
@@ -108,7 +108,7 @@ const buildProductCardBadges = ({
     badges.push({
       key: "verified-seller",
       label: "Verified Seller",
-      image: "/app/assets/verifiedbadge.png",
+      image: "/badges/verifybadge.png",
       tone: "slate",
     });
   }
@@ -117,7 +117,7 @@ const buildProductCardBadges = ({
     badges.push({
       key: "star-seller",
       label: "Star Seller",
-      image: "/app/assets/starsellerbadge.png",
+      image: "/badges/starsellerbadge.png",
       tone: "amber",
     });
   }
@@ -126,7 +126,7 @@ const buildProductCardBadges = ({
     badges.push({
       key: "fast-delivery",
       label: "Fast Delivery",
-      image: "/app/assets/fastbadge.png",
+      image: "/badges/fastbadge.png",
       tone: "sky",
     });
   }

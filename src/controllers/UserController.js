@@ -1,5 +1,6 @@
 const sanitize = require("mongo-sanitize");
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const SuperAdminLog = require("../models/SuperAdminLog");
 
@@ -31,6 +32,11 @@ const buildFilters = (query = {}) => {
     ];
   }
   return filters;
+};
+
+const isValidPassword = (value = "") => {
+  const password = String(value || "");
+  return password.length >= 8 && /[A-Za-z]/.test(password) && /\d/.test(password);
 };
 
 const ensureSuperAdmin = async (req, res) => {
@@ -211,6 +217,16 @@ exports.updateuser = async (req, res) => {
     ["fullname", "email", "mobile", "gender", "role", "isblocked"].forEach((key) => {
       if (payload[key] !== undefined) update[key] = payload[key];
     });
+
+    if (payload.password !== undefined) {
+      const password = String(payload.password || "").trim();
+      if (!isValidPassword(password)) {
+        return res.status(400).json({
+          message: "Password must be at least 8 characters and include letters and numbers",
+        });
+      }
+      update.password = await bcrypt.hash(password, 12);
+    }
 
     if (update.email) update.email = String(update.email).trim().toLowerCase();
     if (update.mobile) update.mobile = String(update.mobile).trim();

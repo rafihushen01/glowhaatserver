@@ -1,7 +1,8 @@
 const express=require("express")
-const { requestsignupotp, verifysignupotp, requestsigninotp, verifysigninotp, userlogout, getcurrentuser, requestsuperadminotp, verifysuperadminotp, superadminsignin, googlesignup, googlesignin } = require("../controllers/AuthController")
+const { requestsignupotp, verifysignupotp, requestsigninotp, verifysigninotp, userlogout, getcurrentuser, requestsuperadminotp, verifysuperadminotp, superadminsignin, googlesignup, googlesignin, updatecurrentuserprofile } = require("../controllers/AuthController")
 const { otpLimiter } = require("../utils/RateLimit")
 const isauth=require("../middlewares/IsAuth")
+const upload = require("../middlewares/Multer")
 
 const router=express.Router()
 router.post("/signup", requestsignupotp)
@@ -18,5 +19,7 @@ router.post("/google/signup", googlesignup)
 router.post("/google/signin", googlesignin)
 router.post("/logout",userlogout)
 router.get("/me",isauth,getcurrentuser)
+router.get("/currentuser",isauth,getcurrentuser)
+router.patch("/profile", isauth, upload.single("avatar"), updatecurrentuserprofile)
 
 module.exports=router

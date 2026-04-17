@@ -45,7 +45,7 @@ const {
   getAdminSubscriptions,
   decideSubscription,
 } = require("../controllers/SellerPanelController");
-const { getPublicShopProfile } = require("../controllers/SellerPublicController");
+const { getPublicShopProfile, toggleShopFollow, rateShop, reportShop } = require("../controllers/SellerPublicController");
 const {
   startSellerChat,
   getMyChatThreads,
@@ -61,6 +61,11 @@ const {
   createSellerReport,
   getAdminChatReports,
   decideChatReport,
+  getAdminChatThreads,
+  getAdminChatThreadById,
+  adminEditChatMessage,
+  adminDeleteChatMessage,
+  adminSendMessageToThread,
 } = require("../controllers/SellerChatController");
 
 const router = express.Router();
@@ -147,7 +152,10 @@ router.get("/admin/panel/shops", isauth, getAdminShops);
 router.get("/admin/panel/subscriptions", isauth, getAdminSubscriptions);
 router.patch("/admin/panel/subscriptions/:id/decision", isauth, decideSubscription);
 
-router.get("/public/shop/:slug", getPublicShopProfile);
+router.get("/public/shop/:slug", optionalauth, getPublicShopProfile);
+router.post("/public/shop/:slug/follow", optionalauth, toggleShopFollow);
+router.post("/public/shop/:slug/rate", isauth, rateShop);
+router.post("/public/shop/:slug/report", isauth, upload.any(), reportShop);
 
 router.post("/chat/start", optionalauth, startSellerChat);
 router.get("/chat/threads", optionalauth, getMyChatThreads);
@@ -163,5 +171,10 @@ router.get("/chat/search", optionalauth, searchChatMessages);
 router.post("/chat/reports", optionalauth, upload.any(), createSellerReport);
 router.get("/admin/panel/chat-reports", isauth, getAdminChatReports);
 router.patch("/admin/panel/chat-reports/:reportid/decision", isauth, decideChatReport);
+router.get("/admin/panel/chat/threads", isauth, getAdminChatThreads);
+router.get("/admin/panel/chat/threads/:threadid", isauth, getAdminChatThreadById);
+router.patch("/admin/panel/chat/threads/:threadid/messages/:messageid", isauth, adminEditChatMessage);
+router.delete("/admin/panel/chat/threads/:threadid/messages/:messageid", isauth, adminDeleteChatMessage);
+router.post("/admin/panel/chat/threads/:threadid/messages", isauth, adminSendMessageToThread);
 
 module.exports = router;
