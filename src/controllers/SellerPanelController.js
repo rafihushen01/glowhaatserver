@@ -17,6 +17,7 @@ const SellerSubscription = require("../models/SellerSubscription");
 
 const KHAN_BKASH_NUMBER = "01862623066";
 const ORDER_STATUSES = ["placed", "processing", "shipped", "delivered", "returned", "canceled"];
+const DELETE_BLOCKING_STATUSES = ["placed", "processing"];
 const SUBSCRIPTION_PLANS = {
   1000: { name: "Bronze", save: 300 },
   5000: { name: "Silver", save: 1000 },
@@ -30,6 +31,13 @@ const normalizeEmail = (v = "") => String(v).trim().toLowerCase();
 const toNumber = (v, fallback = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+};
+const parseBoolean = (value, fallback = false) => {
+  if (typeof value === "boolean") return value;
+  const normalized = normalizeText(value).toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 };
 const slugify = (value = "") =>
   normalizeText(value)
@@ -559,12 +567,100 @@ exports.deleteSellerItem = async (req, res) => {
     const seller = await ensureRole(req, res, "Seller");
     if (!seller) return;
     const { id } = req.params;
-    const deleted = await Item.findOneAndDelete({ _id: id, sellerid: seller._id });
-    if (!deleted) return res.status(404).json({ success: false, message: "Item not found." });
-    await SellerSponsorship.deleteMany({ itemid: deleted._id });
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      return res.status(400).json({ success: false, message: "Invalid item id." });
+    }
+
+    const item = await Item.findOne({ _id: id, sellerid: seller._id }).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Item not found." });
+
+    const forcecancel = parseBoolean(req.query?.forcecancel ?? req.body?.forcecancel, false);
+    const pendingSellerOrders = await SellerOrder.find({
+      sellerid: seller._id,
+      "item.productid": item._id,
+      status: { $in: DELETE_BLOCKING_STATUSES },
+    })
+      .select("_id orderid ordernumber status customer.fullname customer.mobile item.name item.quantity")
+      .lean();
+
+    if (pendingSellerOrders.length && !forcecancel) {
+      return res.status(409).json({
+        success: false,
+        requiresforce: true,
+        message:
+          "This item has pending/processing orders. Deleting now will cancel those orders. Confirm force delete to continue.",
+        pendingordercount: pendingSellerOrders.length,
+        pendingorders: pendingSellerOrders,
+      });
+    }
+
+    let canceledsellerorders = 0;
+    let canceledmainorders = 0;
+
+    if (pendingSellerOrders.length && forcecancel) {
+      const now = new Date();
+      const pendingSellerOrderIds = pendingSellerOrders.map((entry) => entry._id);
+      await SellerOrder.updateMany(
+        { _id: { $in: pendingSellerOrderIds } },
+        {
+          $set: { status: "canceled" },
+          $push: {
+            statushistory: {
+              status: "canceled",
+              note: `Canceled automatically: seller deleted product "${item.name || "item"}".`,
+              changedby: seller._id,
+              changedat: now,
+            },
+          },
+        }
+      );
+      canceledsellerorders = pendingSellerOrderIds.length;
+
+      const mainOrderIds = Array.from(
+        new Set(
+          pendingSellerOrders
+            .map((entry) => String(entry.orderid || ""))
+            .filter((entry) => mongoose.Types.ObjectId.isValid(entry))
+        )
+      ).map((entry) => new mongoose.Types.ObjectId(entry));
+
+      if (mainOrderIds.length) {
+        const mainOrders = await Order.find({
+          _id: { $in: mainOrderIds },
+          status: { $in: DELETE_BLOCKING_STATUSES },
+        });
+
+        for (const order of mainOrders) {
+          order.status = "canceled";
+          order.statushistory.push({
+            status: "canceled",
+            note: `Order canceled automatically: seller deleted product "${item.name || "item"}".`,
+            changedby: seller._id,
+            changedat: now,
+          });
+          await order.save();
+        }
+        canceledmainorders = mainOrders.length;
+      }
+    }
+
+    await Item.deleteOne({ _id: item._id, sellerid: seller._id });
+    await SellerSponsorship.deleteMany({ itemid: item._id });
+
+    if (canceledsellerorders || canceledmainorders) {
+      return res.status(200).json({
+        success: true,
+        message: `Item deleted. ${canceledsellerorders} seller order(s) and ${canceledmainorders} main order(s) were canceled automatically.`,
+        canceled: {
+          sellerorders: canceledsellerorders,
+          mainorders: canceledmainorders,
+        },
+      });
+    }
+
     return res.status(200).json({ success: true, message: "Item deleted." });
-  } catch (_error) {
-    return res.status(500).json({ success: false, message: "Failed to delete item." });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || "Failed to delete item." });
   }
 };
 
@@ -576,7 +672,28 @@ exports.getSellerOrders = async (req, res) => {
     const filter = { sellerid: seller._id };
     if (ORDER_STATUSES.includes(status)) filter.status = status;
     const orders = await SellerOrder.find(filter).sort({ createdAt: -1 }).lean();
-    return res.status(200).json({ success: true, count: orders.length, orders });
+
+    const mainOrderIds = Array.from(
+      new Set(
+        orders
+          .map((entry) => String(entry.orderid || ""))
+          .filter((entry) => mongoose.Types.ObjectId.isValid(entry))
+      )
+    ).map((entry) => new mongoose.Types.ObjectId(entry));
+
+    const mainOrders = mainOrderIds.length
+      ? await Order.find({ _id: { $in: mainOrderIds } })
+          .select("ordernumber status customer shippingaddress payment notes createdAt updatedAt statushistory")
+          .lean()
+      : [];
+    const mainOrderMap = new Map(mainOrders.map((entry) => [String(entry._id), entry]));
+
+    const enrichedOrders = orders.map((entry) => ({
+      ...entry,
+      mainorder: mainOrderMap.get(String(entry.orderid || "")) || null,
+    }));
+
+    return res.status(200).json({ success: true, count: enrichedOrders.length, orders: enrichedOrders });
   } catch (_error) {
     return res.status(500).json({ success: false, message: "Failed to fetch orders." });
   }
