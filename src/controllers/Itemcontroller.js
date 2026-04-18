@@ -1528,16 +1528,27 @@ exports.getDiscoveryNewIn = async (req, res) => {
 
 exports.getDiscoveryCms = async (req, res) => {
   try {
-    const [bestSellingBanner, fiveStarBanner] = await Promise.all([
-      Homebanner.find({ sectionkey: "bestselling" }).sort({ bannernumber: 1, createdAt: -1 }).limit(1).lean(),
-      Homebanner.find({ sectionkey: "fivestar" }).sort({ bannernumber: 1, createdAt: -1 }).limit(1).lean(),
+    const [bestSellingBanners, fiveStarBanners, newInBanners] = await Promise.all([
+      Homebanner.find({ sectionkey: "bestselling", status: "active" }).sort({ bannernumber: 1, createdAt: -1 }).lean(),
+      Homebanner.find({ sectionkey: "fivestar", status: "active" }).sort({ bannernumber: 1, createdAt: -1 }).lean(),
+      Homebanner.find({ sectionkey: "newin", status: "active" }).sort({ bannernumber: 1, createdAt: -1 }).lean(),
     ]);
 
     return res.status(200).json({
       success: true,
       data: {
-        bestselling: bestSellingBanner[0] || null,
-        fivestar: fiveStarBanner[0] || null,
+        bestselling: {
+          primary: bestSellingBanners[0] || null,
+          banners: bestSellingBanners,
+        },
+        fivestar: {
+          primary: fiveStarBanners[0] || null,
+          banners: fiveStarBanners,
+        },
+        newin: {
+          primary: newInBanners[0] || null,
+          banners: newInBanners,
+        },
       },
     });
   } catch (error) {

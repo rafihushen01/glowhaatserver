@@ -5,27 +5,25 @@ const {
   createhomebanner,
   edithomebanner,
   deletehomebanner,
+  restorehomebanner,
+  togglehomebannerstatus,
+  permanentlyDeleteHomebanner,
   gethomebanner,
+  gethomebannerdownload,
 } = require("../controllers/HomeBannerController");
 
 const upload = require("../middlewares/Multer");
 
-// ================= ADMIN ROUTES =================
-
-// Create Banner
 router.post("/create", upload.single("image"), createhomebanner);
-
-// Edit Banner
 router.put("/edit/:id", upload.single("image"), edithomebanner);
 
-// Delete Banner
+router.patch("/status/:id", togglehomebannerstatus);
+router.patch("/restore/:id", restorehomebanner);
+
 router.delete("/delete/:id", deletehomebanner);
+router.delete("/permanent/:id", permanentlyDeleteHomebanner);
 
-
-// ================= PUBLIC USER ROUTE =================
-
-// Get banners for frontend
+router.get("/download/:id", gethomebannerdownload);
 router.get("/gethomebanners", gethomebanner);
-
 
 module.exports = router;

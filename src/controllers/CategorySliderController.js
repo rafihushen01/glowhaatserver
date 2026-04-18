@@ -1,12 +1,66 @@
 const uploadoncloudinary = require("../utils/Cloudinary.js");
 const Nav = require("../models/Nav.js");
-const slugify=require("../utils/Slugify.js");
+const slugify = require("../utils/Slugify.js");
 const CategorySlider = require("../models/CategorySlider.js");
-const dotenv=require("dotenv");
-dotenv.config();
+
+const FRONTEND_URL = String(process.env.FRONTEND_URL || "").replace(/\/+$/, "");
 
 const normalizeText = (value) => {
   return typeof value === "string" ? value.trim() : "";
+};
+
+const parseDate = (value) => {
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+};
+
+const parseNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const typeAliases = {
+  slider: "slider",
+  shopbycategory: "shopbeautyproductbycategory",
+  shopbeautybycategory: "shopbeautyproductbycategory",
+  shopbeautyproductbycategory: "shopbeautyproductbycategory",
+  shopbeautybyconcern: "shopbeautyproductbyconcern",
+  shopbeautyproductbyconcern: "shopbeautyproductbyconcern",
+  campaign: "campaign",
+  campaignbuilder: "campaign",
+  deals: "deals",
+  dealsbuilder: "deals",
+  topbrands: "topbrands",
+  topbrandoffers: "topbrands",
+  extradiscount: "extradiscount",
+  extradiscountoffer: "extradiscount",
+};
+
+const normalizeType = (value) => {
+  const normalized = String(value || "slider").trim().toLowerCase();
+  return typeAliases[normalized] || "slider";
+};
+
+const expandTypeMatches = (normalizedType) => {
+  const all = new Set([normalizedType]);
+  Object.entries(typeAliases).forEach(([rawType, canonical]) => {
+    if (canonical === normalizedType) all.add(rawType);
+  });
+  return [...all];
+};
+
+const normalizeStatus = (value, fallback = "inactive") => {
+  const normalized = String(value || fallback).trim().toLowerCase();
+  if (["active", "inactive", "draft"].includes(normalized)) return normalized;
+  return fallback;
+};
+
+const syncLegacyFlags = (doc) => {
+  const status = normalizeStatus(doc.status, "inactive");
+  doc.status = status;
+  doc.isactive = status === "active";
+  doc.deactive = status !== "active";
+  doc.isdeleted = status === "draft";
 };
 
 const normalizeSegments = (body = {}) => {
@@ -26,8 +80,8 @@ const normalizeSegments = (body = {}) => {
         if (Array.isArray(parsed)) {
           return parsed.map((seg) => String(seg).trim()).filter(Boolean);
         }
-      } catch (_err) {
-        // fall through to single-value handling
+      } catch (_error) {
+        // keep single string fallback
       }
     }
 
@@ -37,31 +91,50 @@ const normalizeSegments = (body = {}) => {
   return [];
 };
 
-const parallelUpload = async (files, concurrency = 70) => {
-  const results = [];
+const inferMediaType = (file, url = "") => {
+  const mime = String(file?.mimetype || "").toLowerCase();
+  if (mime.startsWith("video/")) return "video";
+
+  const normalizedUrl = String(url || "").toLowerCase();
+  if (
+    normalizedUrl.includes(".mp4") ||
+    normalizedUrl.includes(".mov") ||
+    normalizedUrl.includes(".mkv") ||
+    normalizedUrl.includes(".webm")
+  ) {
+    return "video";
+  }
+
+  return "image";
+};
+
+const parallelUpload = async (files = [], concurrency = 20) => {
+  if (!Array.isArray(files) || !files.length) return [];
+
+  const results = new Array(files.length);
   let index = 0;
 
   const worker = async () => {
     while (index < files.length) {
-      const currentIndex = index++;
-      const file = files[currentIndex];
+      const current = index;
+      index += 1;
 
+      const file = files[current];
       try {
         const url = await uploadoncloudinary(file.path);
-        const isVideo = file.mimetype.startsWith("video");
-
-        results[currentIndex] = {
+        results[current] = {
           url,
-          type: isVideo ? "video" : "image",
+          type: inferMediaType(file, url),
+          order: current,
         };
-      } catch (err) {
-        console.error("UPLOAD FAILED:", err.message);
-        results[currentIndex] = null;
+      } catch (error) {
+        console.error("Category media upload failed:", error.message);
+        results[current] = null;
       }
     }
   };
 
-  const workers = Array.from({ length: concurrency }, worker);
+  const workers = Array.from({ length: Math.min(concurrency, files.length) }, () => worker());
   await Promise.all(workers);
 
   return results.filter(Boolean);
@@ -82,12 +155,11 @@ const normalizeNavImages = (images) => {
       }
 
       if (!img || typeof img !== "object") return null;
-
-      const imageUrl = img.image || img.url || null;
-      if (!imageUrl) return null;
+      const image = img.image || img.url || null;
+      if (!image) return null;
 
       return {
-        image: imageUrl,
+        image,
         link: img.link || "",
         title: img.title || "",
         order: Number.isFinite(img.order) ? img.order : idx,
@@ -106,14 +178,12 @@ const getNavPath = async (navid) => {
 
   while (current) {
     const images = normalizeNavImages(current.images);
-    const image = images.length ? images[0].image : null;
-
     path.unshift({
       _id: current._id,
       name: current.name,
       slug: current.slug,
       depth: current.depth,
-      image,
+      image: images[0]?.image || null,
       images,
     });
 
@@ -127,148 +197,178 @@ const getNavPath = async (navid) => {
   return path;
 };
 
+const requiresNavRoot = (type) => {
+  return ["slider", "shopbeautyproductbycategory", "shopbeautyproductbyconcern"].includes(type);
+};
 
+const buildDefaultLink = ({ type, slug }) => {
+  if (!FRONTEND_URL) return "";
+
+  if (type === "campaign") return `${FRONTEND_URL}/mega/mega-${slug || ""}`;
+  if (type === "deals") return `${FRONTEND_URL}/deals/${slug || ""}`;
+  if (type === "topbrands") return `${FRONTEND_URL}/top-brands/${slug || ""}`;
+  if (type === "extradiscount") return `${FRONTEND_URL}/discounts/offer/${slug || ""}`;
+
+  return `${FRONTEND_URL}/s/${slug || ""}`;
+};
+
+const ensureUniqueSlug = async (baseSlug, currentId = null) => {
+  let nextSlug = baseSlug || `section-${Date.now()}`;
+  let count = 1;
+
+  while (true) {
+    const query = { slug: nextSlug };
+    if (currentId) query._id = { $ne: currentId };
+
+    const exists = await CategorySlider.exists(query);
+    if (!exists) return nextSlug;
+
+    nextSlug = `${baseSlug}-${count}`;
+    count += 1;
+  }
+};
 
 exports.createCategorySlider = async (req, res) => {
   try {
     const name = normalizeText(req.body?.name);
     const navrootid = normalizeText(req.body?.navrootid);
-    const type = normalizeText(req.body?.type) || "slider";
-    const order = Number(req.body?.order);
-    const normalizedOrder = Number.isFinite(order) ? order : 0;
+    const type = normalizeType(req.body?.type);
+    const status = normalizeStatus(req.body?.status, "inactive");
+    const order = parseNumber(req.body?.order, 0);
     const segments = normalizeSegments(req.body);
 
-    // ---------- VALIDATION ----------
-    if (!name || !navrootid) {
-      return res.status(400).json({ success: false, message: "Name & Nav Root required" });
+    if (!name) {
+      return res.status(400).json({ success: false, message: "Title is required" });
     }
 
-    const navRootExists = await Nav.exists({ _id: navrootid });
-    if (!navRootExists) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid Nav Root selected",
-      });
+    if (requiresNavRoot(type) && !navrootid) {
+      return res.status(400).json({ success: false, message: "Menu location is required for this type" });
     }
 
-    // ---------- UNIQUE SLUG ----------
-    let slug = slugify(name);
-    const slugExists = await CategorySlider.findOne({ slug });
-    if (slugExists) slug = `${slug}-${Date.now()}`;
+    if (navrootid) {
+      const navExists = await Nav.exists({ _id: navrootid });
+      if (!navExists) {
+        return res.status(400).json({ success: false, message: "Invalid menu location" });
+      }
+    }
 
-    // ---------- MEDIA UPLOAD ----------
+    const baseSlug = slugify(name) || `section-${Date.now()}`;
+    const slug = await ensureUniqueSlug(baseSlug);
+
     let media = [];
-    if (req.files?.length) {
-      media = await parallelUpload(req.files, 70);
+    if (Array.isArray(req.files) && req.files.length) {
+      media = await parallelUpload(req.files, 20);
     }
 
-    // ---------- INITIALIZE CATEGORY ----------
     const category = new CategorySlider({
       name,
       slug,
-      navlink: `${process.env.FRONTEND_URL}/s/${slug}`, // Next.js friendly route
+      navlink: normalizeText(req.body?.navlink) || buildDefaultLink({ type, slug }),
       media,
-      order: normalizedOrder,
-      navrootid,
+      order,
+      navrootid: navrootid || null,
       type,
-      isactive: false,
-      segments: [], // initialize empty array
+      status,
+      segments: [],
     });
 
-    // ---------- ADD INITIAL SEGMENTS IF PROVIDED ----------
+    syncLegacyFlags(category);
+
     if (segments.length) {
       for (const navid of segments) {
-        // Prevent duplicate
-        if (!category.segments.find(s => String(s.navrootid) === String(navid))) {
-          const navpath = await getNavPath(navid); // Build full nav path automatically
-          category.segments.push({ navrootid: navid, navpath });
+        if (!category.segments.find((segment) => String(segment.navrootid) === String(navid))) {
+          const navpath = await getNavPath(navid);
+          if (navpath.length) {
+            category.segments.push({ navrootid: navid, navpath });
+          }
         }
       }
     }
 
     await category.save();
 
-    // ---------- RETURN FULL CATEGORY OBJECT ----------
-    res.status(201).json({ success: true, data: category });
-
+    return res.status(201).json({ success: true, data: category });
   } catch (error) {
-    console.error("CREATE CATEGORY ERROR:", error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-exports.deleteCategorySlider = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const category = await CategorySlider.findById(id);
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Category not found",
-      });
-    }
-
-    category.isdeleted = true;
-    category.isactive = false;
-    await category.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Category deleted successfully",
-    });
-  } catch (error) {
-    console.error("DELETE CATEGORY ERROR:", error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error("createCategorySlider error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
 exports.updateCategorySlider = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, order, type } = req.body;
 
     const category = await CategorySlider.findById(id);
     if (!category) {
       return res.status(404).json({ success: false, message: "Category not found" });
     }
 
-    // ---------- FAST FIELD UPDATE ----------
-    if (name && name !== category.name) {
-      let newSlug = slugify(name);
+    const nextName = normalizeText(req.body?.name);
+    const nextType = normalizeType(req.body?.type || category.type);
+    const nextNavRootId = normalizeText(req.body?.navrootid);
 
-      const slugExists = await CategorySlider.findOne({
-        slug: newSlug,
-        _id: { $ne: id },
-      });
+    if (nextName) category.name = nextName;
 
-      if (slugExists) newSlug = `${newSlug}-${Date.now()}`;
-
-      category.name = name;
-      category.slug = newSlug;
-      category.navlink = `/s/${newSlug}`;
+    if (nextName) {
+      const nextSlug = await ensureUniqueSlug(slugify(nextName) || category.slug, id);
+      category.slug = nextSlug;
+      if (typeof req.body?.navlink === "undefined") {
+        category.navlink = buildDefaultLink({ type: nextType, slug: nextSlug });
+      }
     }
 
-    if (typeof order !== "undefined") category.order = order;
-    if (type) category.type = type;
-
-    // ---------- PARALLEL MEDIA UPLOAD ----------
-    if (req.files?.length) {
-      const uploadedMedia = await parallelUpload(req.files, 70); // ⚡ FAST
-      category.media.push(...uploadedMedia); // append, NOT overwrite
+    if (typeof req.body?.type !== "undefined") {
+      category.type = nextType;
+      if (typeof req.body?.navlink === "undefined") {
+        category.navlink = buildDefaultLink({ type: nextType, slug: category.slug });
+      }
     }
 
-    await category.save(); // single DB write
+    if (typeof req.body?.navrootid !== "undefined") {
+      if (!nextNavRootId) {
+        category.navrootid = null;
+      } else {
+        const navExists = await Nav.exists({ _id: nextNavRootId });
+        if (!navExists) {
+          return res.status(400).json({ success: false, message: "Invalid menu location" });
+        }
+        category.navrootid = nextNavRootId;
+      }
+    }
 
-    res.status(200).json({
+    if (requiresNavRoot(category.type) && !category.navrootid) {
+      return res.status(400).json({ success: false, message: "Menu location is required for this type" });
+    }
+
+    if (typeof req.body?.order !== "undefined") {
+      category.order = parseNumber(req.body.order, category.order || 0);
+    }
+
+    if (typeof req.body?.status !== "undefined") {
+      category.status = normalizeStatus(req.body.status, category.status || "inactive");
+      syncLegacyFlags(category);
+    }
+
+    if (typeof req.body?.navlink !== "undefined") {
+      category.navlink = normalizeText(req.body.navlink) || buildDefaultLink({ type: category.type, slug: category.slug });
+    }
+
+    if (Array.isArray(req.files) && req.files.length) {
+      const uploaded = await parallelUpload(req.files, 20);
+      const start = Array.isArray(category.media) ? category.media.length : 0;
+      category.media = [...(category.media || []), ...uploaded.map((entry, idx) => ({ ...entry, order: start + idx }))];
+    }
+
+    await category.save();
+
+    return res.status(200).json({
       success: true,
-      message: "Category updated ⚡",
+      message: "Category updated successfully",
       data: category,
     });
-
   } catch (error) {
-    console.error("UPDATE CATEGORY ERROR:", error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error("updateCategorySlider error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -277,106 +377,256 @@ exports.addMediaToCategory = async (req, res) => {
     const { id } = req.params;
 
     const category = await CategorySlider.findById(id);
-    if (!category) return res.status(404).json({ success: false });
+    if (!category) return res.status(404).json({ success: false, message: "Category not found" });
 
-    if (!req.files?.length) {
+    if (!Array.isArray(req.files) || !req.files.length) {
       return res.status(400).json({ success: false, message: "No files uploaded" });
     }
 
-    const uploadedMedia = await parallelUpload(req.files, 15); // ⚡ FAST SAFE
+    const uploaded = await parallelUpload(req.files, 20);
+    const start = Array.isArray(category.media) ? category.media.length : 0;
+    category.media = [...(category.media || []), ...uploaded.map((entry, idx) => ({ ...entry, order: start + idx }))];
 
-    category.media.push(...uploadedMedia);
     await category.save();
 
-    res.json({ success: true, data: category });
-
+    return res.json({ success: true, data: category });
   } catch (error) {
-    console.error("ADD MEDIA ERROR:", error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error("addMediaToCategory error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
 exports.toggleCategoryStatus = async (req, res) => {
   try {
     const { id } = req.params;
-
     const category = await CategorySlider.findById(id);
+
     if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Category not found",
-      });
+      return res.status(404).json({ success: false, message: "Category not found" });
     }
 
-    category.isactive = !category.isactive;
+    category.status = category.status === "active" ? "inactive" : "active";
+    syncLegacyFlags(category);
     await category.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: `Category ${category.isactive ? "Activated" : "Deactivated"}`,
+      message: `Category ${category.status}`,
       data: category,
     });
   } catch (error) {
-    console.error("TOGGLE STATUS ERROR:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    console.error("toggleCategoryStatus error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
+
+exports.deleteCategorySlider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const category = await CategorySlider.findById(id);
+
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    category.status = "draft";
+    syncLegacyFlags(category);
+    await category.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Category moved to draft",
+      data: category,
+    });
+  } catch (error) {
+    console.error("deleteCategorySlider error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.restoreCategorySlider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const category = await CategorySlider.findById(id);
+
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    category.status = normalizeStatus(req.body?.status, "inactive");
+    if (category.status === "draft") category.status = "inactive";
+    syncLegacyFlags(category);
+    await category.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Category restored successfully",
+      data: category,
+    });
+  } catch (error) {
+    console.error("restoreCategorySlider error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.permanentlyDeleteCategorySlider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const category = await CategorySlider.findById(id);
+
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    await category.deleteOne();
+
+    return res.status(200).json({
+      success: true,
+      message: "Category permanently deleted",
+    });
+  } catch (error) {
+    console.error("permanentlyDeleteCategorySlider error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.addSegmentToCategory = async (req, res) => {
   try {
     const { categoryid, navid } = req.body;
 
     const category = await CategorySlider.findById(categoryid);
     if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Category not found",
-      });
+      return res.status(404).json({ success: false, message: "Category not found" });
     }
 
-    // Prevent duplicate
-    const exists = category.segments.find(
-      (s) => String(s.navrootid) === String(navid)
-    );
-
+    const exists = category.segments.find((segment) => String(segment.navrootid) === String(navid));
     if (exists) {
-      return res.status(400).json({
-        success: false,
-        message: "Segment already exists",
+      return res.status(400).json({ success: false, message: "Segment already exists" });
+    }
+
+    const navpath = await getNavPath(navid);
+    if (!navpath.length) {
+      return res.status(400).json({ success: false, message: "Invalid nav path" });
+    }
+
+    category.segments.push({ navrootid: navid, navpath });
+    await category.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Segment added",
+      data: category,
+    });
+  } catch (error) {
+    console.error("addSegmentToCategory error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.bulkAddSegments = async (req, res) => {
+  try {
+    let { categoryid, navids } = req.body;
+
+    if (typeof navids === "string") navids = [navids];
+    if (!Array.isArray(navids)) navids = [];
+
+    navids = navids.map((id) => String(id || "").trim()).filter(Boolean);
+
+    if (!categoryid) {
+      return res.status(400).json({ success: false, message: "categoryid required" });
+    }
+
+    if (!navids.length) {
+      return res.status(400).json({ success: false, message: "navids array required" });
+    }
+
+    const category = await CategorySlider.findById(categoryid);
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    const newSegments = [];
+
+    for (const navid of navids) {
+      const exists = category.segments.find((segment) => String(segment.navrootid) === String(navid));
+      if (exists) continue;
+
+      const navpath = await getNavPath(navid);
+      if (!navpath.length) continue;
+
+      newSegments.push({ navrootid: navid, navpath });
+    }
+
+    if (!newSegments.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No new segments added",
+        data: category,
       });
     }
 
-    // 🔥 BUILD FULL NAV PATH AUTOMATIC
-    const navpath = await getNavPath(navid);
+    category.segments.push(...newSegments);
+    await category.save();
 
-    category.segments.push({
-      navrootid: navid,
-      navpath,
+    return res.status(200).json({
+      success: true,
+      message: "Segments added successfully",
+      addedCount: newSegments.length,
+      totalSegments: category.segments.length,
+      data: category,
+    });
+  } catch (error) {
+    console.error("bulkAddSegments error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.removeSegment = async (req, res) => {
+  try {
+    const { categoryid, navid } = req.body;
+
+    const category = await CategorySlider.findById(categoryid);
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    category.segments = category.segments.filter((segment) => String(segment.navrootid) !== String(navid));
+    await category.save();
+
+    return res.status(200).json({ success: true, message: "Segment removed", data: category });
+  } catch (error) {
+    console.error("removeSegment error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.reorderSegments = async (req, res) => {
+  try {
+    const { categoryid, orderedNavIds } = req.body;
+
+    if (!Array.isArray(orderedNavIds)) {
+      return res.status(400).json({ success: false, message: "orderedNavIds array required" });
+    }
+
+    const category = await CategorySlider.findById(categoryid);
+    if (!category) {
+      return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    category.segments.sort((a, b) => {
+      return orderedNavIds.indexOf(String(a.navrootid)) - orderedNavIds.indexOf(String(b.navrootid));
     });
 
     await category.save();
 
-    res.json({
-      success: true,
-      message: "Segment added successfully 🚀",
-      data: category,
-    });
-
-  } catch (err) {
-    console.error("ADD SEGMENT ERROR:", err);
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+    return res.status(200).json({ success: true, message: "Segments reordered", data: category });
+  } catch (error) {
+    console.error("reorderSegments error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
-
-
-exports.getFullNavTree = async (req, res) => {
+exports.getFullNavTree = async (_req, res) => {
   try {
     const all = await Nav.find({
       isactive: true,
@@ -388,388 +638,180 @@ exports.getFullNavTree = async (req, res) => {
     const map = new Map();
     const roots = [];
 
-    // build map
-    all.forEach(cat => {
-      cat.children = [];
-      map.set(String(cat._id), cat);
+    all.forEach((node) => {
+      node.children = [];
+      map.set(String(node._id), node);
     });
 
-    // build tree
-    all.forEach(cat => {
-      if (cat.parentid) {
-        const parent = map.get(String(cat.parentid));
-        if (parent) parent.children.push(cat);
+    all.forEach((node) => {
+      if (node.parentid) {
+        const parent = map.get(String(node.parentid));
+        if (parent) parent.children.push(node);
       } else {
-        roots.push(cat);
+        roots.push(node);
       }
     });
 
-    res.json({
-      success: true,
-      data: roots,
-    });
-
-  } catch (err) {
-    console.error("FULL NAV TREE ERROR:", err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-exports.removeSegmentFromCategory = async (req, res) => {
-  try {
-    const { categoryid, navid } = req.body;
-
-    const category = await CategorySlider.findById(categoryid);
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Category not found",
-      });
-    }
-
-    category.segments = category.segments.filter(
-      (s) => s.navid.toString() !== navid
-    );
-
-    await category.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Segment removed",
-      data: category,
-    });
+    return res.status(200).json({ success: true, data: roots });
   } catch (error) {
-    console.error("REMOVE SEGMENT ERROR:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    console.error("getFullNavTree error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
-exports.getActiveCategorySliders = async (req, res) => {
+
+exports.getActiveCategorySliders = async (_req, res) => {
   try {
     const categories = await CategorySlider.find({
-      isactive: true,
-      isdeleted: false,
+      $or: [
+        { status: "active", isdeleted: false },
+        { status: { $exists: false }, isactive: true, isdeleted: false },
+      ],
     })
       .populate("navrootid")
-      .populate("segments.navpath")
-      .sort({ order: 1 })
+      .sort({ order: 1, createdAt: -1 })
       .lean();
 
-    res.status(200).json({
-      success: true,
-      data: categories,
-    });
+    return res.status(200).json({ success: true, data: categories });
   } catch (error) {
-    console.error("GET ACTIVE CATEGORY ERROR:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
+    console.error("getActiveCategorySliders error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
 exports.getAllCategorySliders = async (req, res) => {
   try {
-    const categories = await CategorySlider.find({
-      isdeleted: false,
-    })
-      .populate("navrootid")
-      .populate("segments.navpath")
-      .sort({ order: 1, createdAt: -1 })
-      .lean();
+    const status = String(req.query?.status || "all").trim().toLowerCase();
+    const type = normalizeType(req.query?.type || "");
+    const q = normalizeText(req.query?.q);
+    const sortMode = String(req.query?.sort || "newest").trim().toLowerCase();
 
-    res.status(200).json({
-      success: true,
-      data: categories,
-    });
-  } catch (error) {
-    console.error("GET ALL CATEGORY ERROR:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
-  }
-};
-// exports.bulkAddSegments = async (req, res) => {
+    const query = {};
 
-
-
-
-
-
-//   try {
-//     const { categoryid, navids } = req.body; // navids = array of nav _id
-
-//     if (!Array.isArray(navids) || !navids.length) {
-//       return res.status(400).json({ success: false, message: "navids array required" });
-//     }
-
-//     const category = await CategorySlider.findById(categoryid);
-//     if (!category) return res.status(404).json({ success: false, message: "Category not found" });
-
-//     const newSegments = [];
-
-//     for (const navid of navids) {
-//       if (!category.segments.find(s => String(s.navrootid) === String(navid))) {
-//         const navpath = await getNavPath(navid);
-//         newSegments.push({ navrootid: navid, navpath });
-//       }
-//     }
-
-//     if (!newSegments.length)
-//       return res.status(400).json({ success: false, message: "All segments already exist" });
-
-//     category.segments.push(...newSegments);
-//     await category.save();
-
-//     res.json({ success: true, message: "Bulk segments added ✅", data: category });
-//   } catch (err) {
-//     console.error("BULK ADD SEGMENTS ERROR:", err);
-//     res.status(500).json({ success: false, message: err.message });
-//   }
-// };
-exports.removeSegment = async (req, res) => {
-  try {
-    const { categoryid, navid } = req.body;
-    const category = await CategorySlider.findById(categoryid);
-    if (!category) return res.status(404).json({ success: false });
-
-    category.segments = category.segments.filter(s => String(s.navrootid) !== String(navid));
-    await category.save();
-
-    res.json({ success: true, message: "Segment removed ✅", data: category });
-  } catch (err) {
-    console.error("REMOVE SEGMENT ERROR:", err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-// new buildaddsegment controller
-exports.bulkAddSegments = async (req, res) => {
-  try {
-    // ---------- SAFE BODY PARSE (FRONTEND FRIENDLY) ----------
-    let { categoryid, navids } = req.body;
-
-    // Handle FormData / multipart cases (navids may come as string)
-    if (typeof navids === "string") {
-      navids = [navids];
-    }
-
-    // ---------- VALIDATION ----------
-    if (!categoryid) {
-      return res.status(400).json({
-        success: false,
-        message: "categoryid required",
-      });
-    }
-
-    if (!Array.isArray(navids) || navids.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "navids array required",
-      });
-    }
-
-    // Remove empty / null / undefined values (PREVENT BACKEND REQUIRED ERROR)
-    navids = navids.filter(id => id && id !== "" && id !== "null" && id !== "undefined");
-
-    if (!navids.length) {
-      return res.status(400).json({
-        success: false,
-        message: "No valid navids provided",
-      });
-    }
-
-    // ---------- FIND CATEGORY ----------
-    const category = await CategorySlider.findById(categoryid);
-
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Category not found",
-      });
-    }
-
-    // ---------- BUILD NEW SEGMENTS ----------
-    const newSegments = [];
-
-    for (const navid of navids) {
-      // Skip invalid ObjectId length (extra protection)
-      if (String(navid).length < 10) continue;
-
-      const alreadyExists = category.segments.find(
-        s => String(s.navrootid) === String(navid)
-      );
-
-      if (!alreadyExists) {
-        const navpath = await getNavPath(navid);
-
-        // Skip if navpath failed (prevents navroot required error)
-        if (!navpath || navpath.length === 0) continue;
-
-        newSegments.push({
-          navrootid: navid,
-          navpath,
-        });
+    if (["active", "inactive", "draft"].includes(status)) {
+      if (status === "active") {
+        query.$or = [
+          { status: "active", isdeleted: false },
+          { status: { $exists: false }, isactive: true, isdeleted: false },
+        ];
+      } else if (status === "inactive") {
+        query.$or = [
+          { status: "inactive", isdeleted: false },
+          { status: { $exists: false }, isactive: false, isdeleted: false },
+        ];
+      } else {
+        query.$or = [{ status: "draft" }, { isdeleted: true }];
       }
     }
 
-    // ---------- NOTHING TO ADD ----------
-    if (!newSegments.length) {
-      return res.status(200).json({
-        success: true,
-        message: "No new segments added (already exists or invalid)",
-        data: category,
-      });
+    if (req.query?.type) {
+      query.type = { $in: expandTypeMatches(type) };
     }
 
-    // ---------- PUSH + SAVE ----------
-    category.segments.push(...newSegments);
-    await category.save();
-
-    // ---------- SUCCESS RESPONSE (FRONTEND FRIENDLY) ----------
-    return res.json({
-      success: true,
-      message: "Segments added successfully ✅",
-      addedCount: newSegments.length,
-      totalSegments: category.segments.length,
-      data: category,
-    });
-
-  } catch (err) {
-    console.error("BULK ADD SEGMENTS ERROR:", err);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-      error: err.message,
-    });
-  }
-};
-
-exports.reorderSegments = async (req, res) => {
-  try {
-    const { categoryid, orderedNavIds } = req.body;
-    const category = await CategorySlider.findById(categoryid);
-    if (!category) return res.status(404).json({ success: false });
-
-    category.segments.sort((a, b) => {
-      return orderedNavIds.indexOf(String(a.navrootid)) - orderedNavIds.indexOf(String(b.navrootid));
-    });
-
-    await category.save();
-
-    res.json({ success: true, message: "Segments reordered ✅", data: category });
-  } catch (err) {
-    console.error("REORDER SEGMENTS ERROR:", err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-let cachedNavTree = null; // ⚡ simple in-memory cache
-
-exports.buildNavTreeCache = async (forceRefresh = false) => {
-  // Return cached version if exists & no force refresh
-  if (cachedNavTree && !forceRefresh) return cachedNavTree;
-
-  const all = await Nav.find({ isactive: true, isdeleted: false }).lean();
-
-  const map = new Map();
-  all.forEach(c => {
-    c.children = [];
-    map.set(String(c._id), c);
-  });
-
-  const roots = [];
-  all.forEach(c => {
-    if (c.parentid) {
-      const parent = map.get(String(c.parentid));
-      if (parent) parent.children.push(c);
-    } else {
-      roots.push(c);
+    if (q) {
+      query.name = { $regex: q, $options: "i" };
     }
-  });
 
-  cachedNavTree = roots; // ⚡ store in memory
+    const fromDate = parseDate(req.query?.from);
+    const toDate = parseDate(req.query?.to);
+    if (fromDate || toDate) {
+      query.createdAt = {};
+      if (fromDate) query.createdAt.$gte = fromDate;
+      if (toDate) query.createdAt.$lte = toDate;
+    }
 
-  console.log('✅ Nav Tree built in-memory');
-  return roots;
-};
+    const sort = sortMode === "oldest" ? { createdAt: 1 } : { createdAt: -1 };
 
-// public category showup
-// =============================================
-// 🚀 PUBLIC CATEGORY + SEGMENT FULL DATA
-// Enterprise Grade — No Redis Required
-// =============================================
-exports.getPublicCategoriesFull = async (req, res) => {
-  try {
-    let categories = await CategorySlider.find({
-      isactive: true,
-      isdeleted: false,
-    })
-      .sort({ order: 1 })
+    const categories = await CategorySlider.find(query)
+      .populate("navrootid")
+      .sort(sort)
       .lean();
 
-    // Fallback: if nothing active, return non-deleted categories so UI can still render.
-    if (!categories.length) {
-      categories = await CategorySlider.find({
-        isdeleted: false,
-      })
-        .sort({ order: 1 })
-        .lean();
+    return res.status(200).json({
+      success: true,
+      count: categories.length,
+      data: categories,
+    });
+  } catch (error) {
+    console.error("getAllCategorySliders error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getPublicCategoriesFull = async (req, res) => {
+  try {
+    const typesParam = normalizeText(req.query?.types || req.query?.type);
+    const filterTypes = typesParam
+      ? typesParam
+          .split(",")
+          .map((entry) => normalizeType(entry))
+          .filter(Boolean)
+      : [];
+
+    const query = {
+      $or: [
+        { status: "active", isdeleted: false },
+        { status: { $exists: false }, isactive: true, isdeleted: false },
+      ],
+    };
+
+    if (filterTypes.length) {
+      const expanded = new Set();
+      filterTypes.forEach((type) => {
+        expandTypeMatches(type).forEach((rawType) => expanded.add(rawType));
+      });
+      query.type = { $in: [...expanded] };
     }
 
+    const categories = await CategorySlider.find(query)
+      .sort({ order: 1, createdAt: -1 })
+      .lean();
+
     if (!categories.length) {
-      return res.json({ success: true, count: 0, data: [] });
+      return res.status(200).json({ success: true, count: 0, data: [] });
     }
 
     const navIds = new Set();
-
-    categories.forEach((cat) => {
-      if (cat.navrootid) navIds.add(String(cat.navrootid));
-
-      cat.segments?.forEach((seg) => {
-        if (seg.navrootid) navIds.add(String(seg.navrootid));
+    categories.forEach((category) => {
+      if (category.navrootid) navIds.add(String(category.navrootid));
+      (category.segments || []).forEach((segment) => {
+        if (segment.navrootid) navIds.add(String(segment.navrootid));
       });
     });
 
-    const navNodes = await Nav.find({
-      _id: { $in: [...navIds] },
-      isactive: true,
-      isdeleted: false,
-    })
-      .select("name slug link images depth parentid")
-      .lean();
+    const navNodes = navIds.size
+      ? await Nav.find({
+          _id: { $in: [...navIds] },
+          isactive: true,
+          isdeleted: false,
+        })
+          .select("name slug link images depth parentid")
+          .lean()
+      : [];
 
     const navMap = new Map();
-    navNodes.forEach((n) => navMap.set(String(n._id), n));
+    navNodes.forEach((node) => navMap.set(String(node._id), node));
 
-    const finalData = categories.map((cat) => {
-      const rootNav = navMap.get(String(cat.navrootid));
-
+    const finalData = categories.map((category) => {
+      const rootNav = category.navrootid ? navMap.get(String(category.navrootid)) : null;
       const rootImage =
         rootNav?.images?.[0]?.image ||
         rootNav?.images?.[0]?.url ||
-        cat.media?.[0]?.url ||
+        category.media?.[0]?.url ||
         null;
 
-      const segments = (cat.segments || [])
-        .map((seg) => {
-          const nav = navMap.get(String(seg.navrootid));
+      const segments = (category.segments || [])
+        .map((segment) => {
+          const nav = navMap.get(String(segment.navrootid));
           if (!nav) return null;
 
-          const leafPathNode =
-            Array.isArray(seg.navpath) && seg.navpath.length
-              ? seg.navpath[seg.navpath.length - 1]
-              : null;
+          const leaf = Array.isArray(segment.navpath) && segment.navpath.length
+            ? segment.navpath[segment.navpath.length - 1]
+            : null;
 
           const segmentImage =
             nav.images?.[0]?.image ||
             nav.images?.[0]?.url ||
-            leafPathNode?.image ||
+            leaf?.image ||
             rootImage ||
             null;
 
@@ -781,18 +823,20 @@ exports.getPublicCategoriesFull = async (req, res) => {
             depth: nav.depth || 0,
             image: segmentImage,
             images: nav.images || [],
-            navpath: seg.navpath || [],
+            navpath: segment.navpath || [],
           };
         })
         .filter(Boolean);
 
       return {
-        _id: cat._id,
-        name: cat.name,
-        slug: cat.slug?.replace(/-\d+$/, ""),
-        navlink: cat.navlink || null,
-        order: cat.order || 0,
-        media: cat.media || [],
+        _id: category._id,
+        name: category.name,
+        slug: category.slug?.replace(/-\d+$/, ""),
+        type: normalizeType(category.type),
+        status: normalizeStatus(category.status, "inactive"),
+        navlink: category.navlink || null,
+        order: category.order || 0,
+        media: category.media || [],
         navroot: rootNav
           ? {
               _id: rootNav._id,
@@ -803,59 +847,61 @@ exports.getPublicCategoriesFull = async (req, res) => {
             }
           : null,
         segments,
+        createdAt: category.createdAt,
+        updatedAt: category.updatedAt,
       };
     });
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       count: finalData.length,
       data: finalData,
     });
-  } catch (err) {
-    console.error("getPublicCategoriesFull Error:", err);
+  } catch (error) {
+    console.error("getPublicCategoriesFull error:", error);
     return res.status(500).json({
       success: false,
       message: "Failed to fetch public categories",
     });
   }
 };
-exports.rebuildAllCategoryNavpaths = async (req, res) => {
+
+exports.rebuildAllCategoryNavpaths = async (_req, res) => {
   try {
     const categories = await CategorySlider.find();
     let updatedCategories = 0;
     let updatedSegments = 0;
 
-    for (const cat of categories) {
-      let catChanged = false;
+    for (const category of categories) {
+      let changed = false;
 
-      for (const segment of cat.segments) {
+      for (const segment of category.segments) {
         const nextPath = await getNavPath(segment.navrootid);
-        const prevPath = JSON.stringify(segment.navpath || []);
-        const newPath = JSON.stringify(nextPath || []);
+        const prev = JSON.stringify(segment.navpath || []);
+        const next = JSON.stringify(nextPath || []);
 
-        if (prevPath !== newPath) {
+        if (prev !== next) {
           segment.navpath = nextPath;
-          catChanged = true;
+          changed = true;
           updatedSegments += 1;
         }
       }
 
-      if (catChanged) {
-        cat.markModified("segments");
-        await cat.save();
+      if (changed) {
+        category.markModified("segments");
+        await category.save();
         updatedCategories += 1;
       }
     }
 
-    res.json({
+    return res.status(200).json({
       success: true,
-      message: "All navpaths rebuilt with images",
+      message: "All nav paths rebuilt",
       updatedCategories,
       updatedSegments,
     });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: err.message });
+  } catch (error) {
+    console.error("rebuildAllCategoryNavpaths error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
