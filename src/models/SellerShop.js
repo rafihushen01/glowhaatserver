@@ -28,26 +28,32 @@ const sellershopSchema = new mongoose.Schema(
       index: true,
     },
     storelayout: {
-      sections: {
-        type: [String],
-        default: ["hero", "featured", "top-selling", "new-in"],
-      },
-      featuredproductids: {
-        type: [{ type: mongoose.Schema.Types.ObjectId, ref: "item" }],
-        default: [],
-      },
-      accent: {
-        type: String,
-        default: "#1f5c49",
-      },
-      updatedby: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
-        default: null,
-      },
-      updatedat: {
-        type: Date,
-        default: null,
+      type: mongoose.Schema.Types.Mixed,
+      default: {
+        sections: ["hero", "featured", "top-selling", "new-in"],
+        featuredproductids: [],
+        accent: "#1f5c49",
+        template: "blank",
+        ispublished: false,
+        draftlayout: {
+          seo: { title: "", description: "" },
+          modules: [],
+          desktopbanner: "",
+          mobilebanner: "",
+          desktopprofileimage: "",
+          mobileprofileimage: "",
+        },
+        publishedlayout: {
+          seo: { title: "", description: "" },
+          modules: [],
+          desktopbanner: "",
+          mobilebanner: "",
+          desktopprofileimage: "",
+          mobileprofileimage: "",
+        },
+        lastpublishedat: null,
+        updatedby: null,
+        updatedat: null,
       },
     },
   },

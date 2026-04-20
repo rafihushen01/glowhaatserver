@@ -12,6 +12,18 @@ const toSafeNumber = (value, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
+const isFreeDeliveryProduct = (product = {}) => {
+  const deliverySchema = product?.deliveryschema || {};
+  const hasFreeShippingFlag = Boolean(deliverySchema?.isfreeshipping);
+  const deliveryCharge = toSafeNumber(deliverySchema?.deliverycharge, NaN);
+  const productLevelDeliveryCharge = toSafeNumber(product?.deliverycharge, NaN);
+
+  if (hasFreeShippingFlag) return true;
+  if (Number.isFinite(deliveryCharge) && deliveryCharge <= 0) return true;
+  if (Number.isFinite(productLevelDeliveryCharge) && productLevelDeliveryCharge <= 0) return true;
+  return false;
+};
+
 const compactSoldText = (value) => {
   const sold = Math.max(0, toSafeNumber(value, 0));
   if (sold >= 1000000) return `${(sold / 1000000).toFixed(1).replace(/\.0$/, "")}M+`;
@@ -93,10 +105,18 @@ const buildProductCardBadges = ({
 }) => {
   const badges = [];
   const badgeSlugs = pickStoreBadgeSlugs(storebadges);
+  const productTags = Array.isArray(product?.tags)
+    ? product.tags.map((entry) => slugifyLoose(entry)).filter(Boolean)
+    : [];
   const sold = Math.max(0, toSafeNumber(product?.totalsold, 0));
+  const addBadge = (badge) => {
+    if (!badge?.key) return;
+    if (badges.some((row) => row.key === badge.key)) return;
+    badges.push(badge);
+  };
 
-  if (product?.deliveryschema?.isfreeshipping) {
-    badges.push({
+  if (isFreeDeliveryProduct(product)) {
+    addBadge({
       key: "free-delivery",
       label: "Free Delivery",
       image: "/badges/freedeliverybadge.png",
@@ -104,17 +124,35 @@ const buildProductCardBadges = ({
     });
   }
 
-  if (badgeSlugs.has("official-store") || badgeSlugs.has("verified-store") || badgeSlugs.has("verified")) {
-    badges.push({
+  const hasOfficialStoreBadge =
+    badgeSlugs.has("official-store") ||
+    badgeSlugs.has("official-store-badge") ||
+    badgeSlugs.has("official-storebadge") ||
+    badgeSlugs.has("officialstorebadge") ||
+    badgeSlugs.has("officialbadge") ||
+    badgeSlugs.has("officiabadge") ||
+    badgeSlugs.has("verified-store") ||
+    badgeSlugs.has("verified") ||
+    productTags.some((tag) => tag.includes("official") || tag.includes("verified"));
+
+  if (hasOfficialStoreBadge) {
+    addBadge({
       key: "verified-seller",
       label: "Verified Seller",
       image: "/badges/verifybadge.png",
       tone: "slate",
     });
+
+    addBadge({
+      key: "fast-delivery",
+      label: "Fast Delivery",
+      image: "/badges/fastbadge.png",
+      tone: "sky",
+    });
   }
 
-  if (starseller || badgeSlugs.has("star-seller")) {
-    badges.push({
+  if (starseller || badgeSlugs.has("star-seller") || productTags.some((tag) => tag.includes("star"))) {
+    addBadge({
       key: "star-seller",
       label: "Star Seller",
       image: "/badges/starsellerbadge.png",
@@ -122,8 +160,8 @@ const buildProductCardBadges = ({
     });
   }
 
-  if (badgeSlugs.has("fast-delivery")) {
-    badges.push({
+  if (badgeSlugs.has("fast-delivery") || productTags.some((tag) => tag.includes("fast"))) {
+    addBadge({
       key: "fast-delivery",
       label: "Fast Delivery",
       image: "/badges/fastbadge.png",
@@ -132,7 +170,7 @@ const buildProductCardBadges = ({
   }
 
   if (sold >= 120) {
-    badges.push({
+    addBadge({
       key: "best-seller",
       label: "Best Seller",
       tone: "rose",
@@ -141,7 +179,7 @@ const buildProductCardBadges = ({
 
   const rank = toSafeNumber(categoryrank, 0);
   if (rank > 0 && rank <= 5) {
-    badges.push({
+    addBadge({
       key: "category-rank",
       label: `#${rank} in Category`,
       tone: "indigo",

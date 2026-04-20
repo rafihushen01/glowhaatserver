@@ -1,5 +1,6 @@
 const uploadoncloudinary = require("../utils/Cloudinary.js");
 const Nav = require("../models/Nav.js");
+const NavLogo = require("../models/NavLogo.js");
 const slugify=require("../utils/Slugify.js");
 const getlogoFile = (req) => {
   if (req.file) return req.file;
@@ -9,6 +10,30 @@ const getlogoFile = (req) => {
   }
 
   return null;
+};
+
+const getAllLogoFiles = (req) => {
+  if (Array.isArray(req.files) && req.files.length) return req.files;
+  const single = getlogoFile(req);
+  return single ? [single] : [];
+};
+
+const normalizeLogoRecord = (logo) => ({
+  _id: logo._id,
+  serialnumber: logo.serialnumber,
+  logo: logo.logo,
+  status: logo.status,
+  isactive: logo.isactive,
+  isdeleted: logo.isdeleted,
+  activatedat: logo.activatedat,
+  deactivatedat: logo.deactivatedat,
+  createdAt: logo.createdAt,
+  updatedAt: logo.updatedAt,
+});
+
+const getNextSerialSeed = async () => {
+  const latest = await NavLogo.findOne({}).sort({ serialnumber: -1 }).select("serialnumber").lean();
+  return Number(latest?.serialnumber || 0);
 };
 
 const getNavPath = async (navid) => {
@@ -273,86 +298,194 @@ if (req.files && req.files.length > 0) {
 // ===============================
 exports.uploadlogo = async (req, res) => {
   try {
-  
-
-    const file = req.file || (req.files && req.files[0]);
-
-    if (!file) {
-      
+    const files = getAllLogoFiles(req);
+    if (!files.length) {
       return res.status(400).json({
         success: false,
         message: "Logo file missing",
       });
     }
 
-   
+    const serialSeed = await getNextSerialSeed();
+    const uploaded = [];
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      const logourl = await uploadoncloudinary(file.path);
+      const created = await NavLogo.create({
+        serialnumber: serialSeed + index + 1,
+        logo: logourl,
+        status: "draft",
+        isactive: false,
+        uploadedby: req.user?.userId || null,
+      });
+      uploaded.push(normalizeLogoRecord(created));
+    }
 
-    const logourl = await uploadoncloudinary(file.path);
-
-
-
-    let nav = await Nav.findOne();
-    if (!nav) nav = await Nav.create({});
-
-    nav.logo = logourl;
-    await nav.save();
-
-
-    res.status(200).json({
+    return res.status(201).json({
       success: true,
-      message: "Logo Uploaded Successfully",
-      logo: logourl,
+      message: `${uploaded.length} logo draft uploaded successfully.`,
+      logos: uploaded,
     });
   } catch (error) {
-    console.log("🔥 UPLOAD ERROR:", error);
-    res.status(500).json({ success: false, message: "Server Error" });
+    console.log("LOGO UPLOAD ERROR:", error);
+    return res.status(500).json({ success: false, message: "Server Error" });
   }
 };
-
-
-
-
 
 // ===============================
 // EDIT LOGO
 // ===============================
 exports.editlogo = async (req, res) => {
+  return exports.uploadlogo(req, res);
+};
+
+exports.uploadlogosbulk = async (req, res) => {
+  return exports.uploadlogo(req, res);
+};
+
+exports.getAdminLogos = async (_req, res) => {
   try {
-    
+    const logos = await NavLogo.find({ isdeleted: false })
+      .sort({ isactive: -1, serialnumber: 1, createdAt: -1 })
+      .lean();
 
-    const file = req.file || (req.files && req.files[0]);
-
-    if (!file) {
-   
-      return res.status(400).json({ success: false, message: "Logo required" });
-    }
-
-  
-
-    const logourl = await uploadoncloudinary(file.path);
-
-
-    let nav = await Nav.findOne();
-    if (!nav) nav = await Nav.create({});
-
-    nav.logo = logourl;
-    await nav.save();
-
-  
-
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: "Logo Updated Successfully",
-      logo: logourl,
+      count: logos.length,
+      logos: logos.map(normalizeLogoRecord),
     });
   } catch (error) {
-    console.log("🔥 EDIT ERROR:", error);
-    res.status(500).json({ success: false, message: "Server Error" });
+    return res.status(500).json({ success: false, message: "Failed to fetch logos." });
   }
 };
-   
 
+exports.getActiveLogo = async (_req, res) => {
+  try {
+    const logo = await NavLogo.findOne({ isactive: true, isdeleted: false })
+      .sort({ updatedAt: -1 })
+      .lean();
 
+    return res.status(200).json({
+      success: true,
+      hasactive: Boolean(logo),
+      logo: logo ? normalizeLogoRecord(logo) : null,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Failed to fetch active logo." });
+  }
+};
+
+exports.activateLogo = async (req, res) => {
+  try {
+    const logoId = req.params.id;
+    const target = await NavLogo.findById(logoId);
+
+    if (!target || target.isdeleted) {
+      return res.status(404).json({ success: false, message: "Logo not found." });
+    }
+
+    if (target.isactive) {
+      return res.status(200).json({
+        success: true,
+        message: "Logo is already active.",
+        logo: normalizeLogoRecord(target),
+      });
+    }
+
+    const existingActive = await NavLogo.findOne({
+      _id: { $ne: target._id },
+      isactive: true,
+      isdeleted: false,
+    })
+      .select("_id serialnumber")
+      .lean();
+
+    if (existingActive) {
+      return res.status(409).json({
+        success: false,
+        message: "First deactivate the current active logo, then activate your desired logo.",
+        activeLogo: existingActive,
+      });
+    }
+
+    target.isactive = true;
+    target.status = "active";
+    target.activatedat = new Date();
+    target.deactivatedat = null;
+    await target.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Logo activated successfully.",
+      logo: normalizeLogoRecord(target),
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "First deactivate the current active logo, then activate your desired logo.",
+      });
+    }
+    return res.status(500).json({ success: false, message: "Failed to activate logo." });
+  }
+};
+
+exports.deactivateLogo = async (req, res) => {
+  try {
+    const logoId = req.params.id;
+    const target = await NavLogo.findById(logoId);
+
+    if (!target || target.isdeleted) {
+      return res.status(404).json({ success: false, message: "Logo not found." });
+    }
+
+    if (!target.isactive) {
+      return res.status(400).json({
+        success: false,
+        message: "This logo is already inactive.",
+      });
+    }
+
+    target.isactive = false;
+    target.status = "draft";
+    target.deactivatedat = new Date();
+    await target.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Logo deactivated successfully.",
+      logo: normalizeLogoRecord(target),
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Failed to deactivate logo." });
+  }
+};
+
+exports.deleteLogoDraft = async (req, res) => {
+  try {
+    const logoId = req.params.id;
+    const target = await NavLogo.findById(logoId);
+
+    if (!target || target.isdeleted) {
+      return res.status(404).json({ success: false, message: "Logo not found." });
+    }
+
+    if (target.isactive) {
+      return res.status(400).json({
+        success: false,
+        message: "Active logo cannot be deleted. Deactivate it first.",
+      });
+    }
+
+    target.isdeleted = true;
+    target.status = "draft";
+    await target.save();
+
+    return res.status(200).json({ success: true, message: "Draft logo deleted successfully." });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Failed to delete logo." });
+  }
+};
 
 // ===============================
 // GET ALL NAV (PUBLIC)
@@ -439,3 +572,4 @@ exports.getCategoryByDepth = async (req, res) => {
     });
   }
 };
+

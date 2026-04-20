@@ -7,6 +7,7 @@ const Order = require("../models/Order.js");
 const Homebanner = require("../models/Homebanner.js");
 const UserProductBehavior = require("../models/UserProductBehavior.js");
 const SellerRequest = require("../models/SellerRequest.js");
+const { enrichProductsWithCardMeta } = require("../utils/ProductCardMeta");
 
 const buildCategoryTree = async (categoryids) => {
   const categories = await Nav.find({
@@ -1154,11 +1155,12 @@ exports.shopbycategory = async (req, res) => {
       popularityscore: Number(popularityMap.get(String(product._id)) || 0),
     }));
     const sorted = sortProducts(filtered, filters.sort);
+    const withCardMeta = await enrichProductsWithCardMeta(sorted);
 
     return res.status(200).json({
       success: true,
-      count: sorted.length,
-      data: sorted,
+      count: withCardMeta.length,
+      data: withCardMeta,
     });
   } catch (error) {
     console.error("shopbycategory error:", error);
@@ -1249,11 +1251,12 @@ exports.filtercategoryproduct = async (req, res) => {
       popularityscore: Number(popularityMap.get(String(product._id)) || 0),
     }));
     const sorted = sortProducts(filtered, filters.sort);
+    const withCardMeta = await enrichProductsWithCardMeta(sorted);
 
     return res.status(200).json({
       success: true,
-      count: sorted.length,
-      data: sorted,
+      count: withCardMeta.length,
+      data: withCardMeta,
     });
   } catch (error) {
     console.error("filtercategoryproduct error:", error);
@@ -1316,7 +1319,8 @@ exports.getDiscoveryBestSellers = async (req, res) => {
     }));
 
     const topForty = ranked.slice(0, 40);
-    const rankFiltered = rank ? topForty.filter((product) => product.bestsellerrank === rank) : topForty;
+    const topFortyWithCardMeta = await enrichProductsWithCardMeta(topForty);
+    const rankFiltered = rank ? topFortyWithCardMeta.filter((product) => product.bestsellerrank === rank) : topFortyWithCardMeta;
 
     const start = (page - 1) * limit;
     const end = start + limit;
@@ -1400,6 +1404,7 @@ exports.getDiscoveryTopRated = async (req, res) => {
       if (b.topratedscore !== a.topratedscore) return b.topratedscore - a.topratedscore;
       return new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0);
     });
+    ranked = await enrichProductsWithCardMeta(ranked);
 
     const start = (page - 1) * limit;
     const end = start + limit;
@@ -1500,6 +1505,7 @@ exports.getDiscoveryNewIn = async (req, res) => {
       if (b.newinscore !== a.newinscore) return b.newinscore - a.newinscore;
       return new Date(b.createdAt || b.createdat || 0) - new Date(a.createdAt || a.createdat || 0);
     });
+    ranked = await enrichProductsWithCardMeta(ranked);
 
     const start = (page - 1) * limit;
     const end = start + limit;

@@ -16,6 +16,7 @@ const {
   resolveProductForSignal,
   recordBehaviorSignal,
 } = require("../utils/RecommendationSignals");
+const { enrichProductsWithCardMeta } = require("../utils/ProductCardMeta");
 
 const ALLOWED_TRACK_EVENTS = new Set([
   "product_click",
@@ -101,6 +102,32 @@ const buildItemCard = (item, extras = {}) => ({
   },
 });
 
+const enrichSectionsWithCardMeta = async (sections = {}) => {
+  const uniqueById = new Map();
+
+  Object.values(sections || {}).forEach((rows) => {
+    (rows || []).forEach((item) => {
+      const key = String(item?._id || "");
+      if (!key || uniqueById.has(key)) return;
+      uniqueById.set(key, item);
+    });
+  });
+
+  if (!uniqueById.size) return sections;
+
+  const enrichedRows = await enrichProductsWithCardMeta(Array.from(uniqueById.values()));
+  const enrichedById = new Map(
+    (enrichedRows || []).map((row) => [String(row?._id || ""), row])
+  );
+
+  const next = {};
+  Object.entries(sections || {}).forEach(([key, rows]) => {
+    next[key] = (rows || []).map((item) => enrichedById.get(String(item?._id || "")) || item);
+  });
+
+  return next;
+};
+
 const ensureSuperAdmin = async (req, res) => {
   const userid = req.user?.userId;
   if (!userid) {
@@ -181,7 +208,7 @@ exports.getPersonalizedRecommendations = async (req, res) => {
 
     const rawCandidates = await Item.find({ isactive: true })
       .select(
-        "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath createdAt createdat"
+        "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath createdAt createdat shopid deliveryschema tags"
       )
       .sort({ createdAt: -1, createdat: -1 })
       .limit(1500)
@@ -346,7 +373,7 @@ exports.getPersonalizedRecommendations = async (req, res) => {
 
     scored.sort((a, b) => b.recscore - a.recscore);
 
-    const data = scored.slice(0, limit);
+    const data = await enrichProductsWithCardMeta(scored.slice(0, limit));
 
     return res.status(200).json({
       success: true,
@@ -396,7 +423,7 @@ exports.getProductPageRecommendations = async (req, res) => {
     const leafRegex = categoryLeafRaw ? new RegExp(escapeRegExp(categoryLeafRaw), "i") : null;
 
     const itemCardProjection =
-      "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath sellerid shopid createdAt createdat";
+      "_id slug name brand whiteimage hoverimage gallery variants star reviewcount totalsold categorytree categorypath sellerid shopid createdAt createdat deliveryschema tags";
 
     const [targetOrderCountAgg, boughtTogetherAgg, alsoViewedBaseAgg] = await Promise.all([
       Order.aggregate([
@@ -822,6 +849,17 @@ exports.getProductPageRecommendations = async (req, res) => {
       .sort((a, b) => b.recommendationmeta.score - a.recommendationmeta.score)
       .slice(0, sectionlimit);
 
+    const sectionsWithCardMeta = await enrichSectionsWithCardMeta({
+      frequentlyboughttogether: frequentlyBoughtTogether,
+      morefromstore: moreFromStore,
+      morefromsamecategoryinstore: moreFromSameCategoryInStore,
+      bestsellingincategoryinstore: bestSellingInThisCategory,
+      storebestsellers: storeBestSellers,
+      similaritems: similarItems,
+      alsoviewed: alsoViewedItems,
+      dealsyoucantmiss: dealsYouCantMiss,
+    });
+
     return res.status(200).json({
       success: true,
       product: {
@@ -829,16 +867,7 @@ exports.getProductPageRecommendations = async (req, res) => {
         slug: product.slug,
         name: product.name,
       },
-      sections: {
-        frequentlyboughttogether: frequentlyBoughtTogether,
-        morefromstore: moreFromStore,
-        morefromsamecategoryinstore: moreFromSameCategoryInStore,
-        bestsellingincategoryinstore: bestSellingInThisCategory,
-        storebestsellers: storeBestSellers,
-        similaritems: similarItems,
-        alsoviewed: alsoViewedItems,
-        dealsyoucantmiss: dealsYouCantMiss,
-      },
+      sections: sectionsWithCardMeta,
       meta: {
         sectionlimit,
         targetordercount: targetOrderCount,

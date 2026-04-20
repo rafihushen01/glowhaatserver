@@ -67,6 +67,35 @@ const {
   adminDeleteChatMessage,
   adminSendMessageToThread,
 } = require("../controllers/SellerChatController");
+const {
+  getAdminShopManagement,
+  getAdminShopManagementById,
+  getAdminBadgeTypes,
+  createAdminBadgeType,
+  updateAdminBadgeType,
+  getAdminBadges,
+  createAdminBadge,
+  updateAdminBadge,
+  toggleAdminBadgeStatus,
+  assignAdminBadgeToShop,
+  setAdminShopBadges,
+  sendAdminMessageToShop,
+  getSellerShopDecorator,
+  saveSellerShopDecoratorDraft,
+  publishSellerShopDecorator,
+  unpublishSellerShopDecorator,
+  getAdminShopDecoratorByShopId,
+  getSellerCreativeAssets,
+  uploadSellerCreativeAssets,
+  updateSellerCreativeAsset,
+  deleteSellerCreativeAsset,
+  downloadSellerCreativeAsset,
+  getAdminCreativeAssets,
+  uploadAdminCreativeAssets,
+  updateAdminCreativeAsset,
+  deleteAdminCreativeAsset,
+  downloadAdminCreativeAsset,
+} = require("../controllers/SellerManagementController");
 
 const router = express.Router();
 
@@ -176,5 +205,38 @@ router.get("/admin/panel/chat/threads/:threadid", isauth, getAdminChatThreadById
 router.patch("/admin/panel/chat/threads/:threadid/messages/:messageid", isauth, adminEditChatMessage);
 router.delete("/admin/panel/chat/threads/:threadid/messages/:messageid", isauth, adminDeleteChatMessage);
 router.post("/admin/panel/chat/threads/:threadid/messages", isauth, adminSendMessageToThread);
+router.post("/admin/panel/shops/:shopid/message", isauth, sendAdminMessageToShop);
+
+router.get("/admin/panel/shop-management", isauth, getAdminShopManagement);
+router.get("/admin/panel/shop-management/:shopid", isauth, getAdminShopManagementById);
+router.patch("/admin/panel/shop-management/:shopid/badges", isauth, setAdminShopBadges);
+
+router.get("/admin/panel/badge-types", isauth, getAdminBadgeTypes);
+router.post("/admin/panel/badge-types", isauth, createAdminBadgeType);
+router.patch("/admin/panel/badge-types/:typeid", isauth, updateAdminBadgeType);
+
+router.get("/admin/panel/badges", isauth, getAdminBadges);
+router.post("/admin/panel/badges", isauth, upload.any(), createAdminBadge);
+router.patch("/admin/panel/badges/:badgeid", isauth, upload.any(), updateAdminBadge);
+router.patch("/admin/panel/badges/:badgeid/status", isauth, toggleAdminBadgeStatus);
+router.post("/admin/panel/badges/:badgeid/assign-shop", isauth, assignAdminBadgeToShop);
+
+router.get("/panel/shop-decorator", isauth, getSellerShopDecorator);
+router.put("/panel/shop-decorator/draft", isauth, saveSellerShopDecoratorDraft);
+router.post("/panel/shop-decorator/publish", isauth, publishSellerShopDecorator);
+router.post("/panel/shop-decorator/unpublish", isauth, unpublishSellerShopDecorator);
+router.get("/admin/panel/shops/:shopid/decorator", isauth, getAdminShopDecoratorByShopId);
+
+router.get("/panel/creative-assets", isauth, getSellerCreativeAssets);
+router.post("/panel/creative-assets", isauth, upload.any(), uploadSellerCreativeAssets);
+router.patch("/panel/creative-assets/:assetid", isauth, upload.any(), updateSellerCreativeAsset);
+router.delete("/panel/creative-assets/:assetid", isauth, deleteSellerCreativeAsset);
+router.get("/panel/creative-assets/:assetid/download", isauth, downloadSellerCreativeAsset);
+
+router.get("/admin/panel/creative-assets", isauth, getAdminCreativeAssets);
+router.post("/admin/panel/creative-assets", isauth, upload.any(), uploadAdminCreativeAssets);
+router.patch("/admin/panel/creative-assets/:assetid", isauth, upload.any(), updateAdminCreativeAsset);
+router.delete("/admin/panel/creative-assets/:assetid", isauth, deleteAdminCreativeAsset);
+router.get("/admin/panel/creative-assets/:assetid/download", isauth, downloadAdminCreativeAsset);
 
 module.exports = router;
